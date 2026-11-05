@@ -275,6 +275,12 @@ local function GetSafeStringWidth(fontString)
     if ok and not IsSecret(w) and type(w) == "number" and w > 0 then
         return w
     end
+    local okText, text = pcall(fontString.GetText, fontString)
+    if okText and text and not IsSecret(text) and type(text) == "string" and #text > 0 then
+        local _, fontHeight = fontString:GetFont()
+        local charWidth = (fontHeight or 10) * 0.65
+        return math.ceil(#text * charWidth)
+    end
     return 0
 end
 
@@ -284,22 +290,39 @@ function MP:UpdatePlateWidth(frame)
     local baseWidth = MP.db.width or 100
     
     local leftWidth = 0
-    if MP.db.showLevel then
+    if MP.db.showLevel and frame.levelText and frame.levelText:IsShown() then
         leftWidth = GetSafeStringWidth(frame.levelText)
+        if leftWidth <= 0 then
+            leftWidth = 14
+        end
     end
     
     local threatWidth = 0
-    if MP.db.enableThreat then
+    if MP.db.enableThreat and frame.threatText and frame.threatText:IsShown() then
         threatWidth = GetSafeStringWidth(frame.threatText)
+        if threatWidth <= 0 then
+            local tText = frame.threatText:GetText()
+            if tText and tText ~= "" then
+                threatWidth = 32
+            end
+        end
     end
     
-    local hpWidth = GetSafeStringWidth(frame.hpText)
+    local hpWidth = 0
+    if frame.hpText and frame.hpText:IsShown() then
+        hpWidth = GetSafeStringWidth(frame.hpText)
+        if hpWidth <= 0 then
+            hpWidth = 50 -- Fallback width for typical health string "100 (100%)" or "26 (26%)"
+        end
+    end
     
-    -- Margins: 3px borders + ~6px gap between each text element (18px with threat, 8px without)
-    local gap = (threatWidth > 0) and 18 or 8
+    -- Margins: 3px borders + generous ~8px gaps between each text element (24px with threat, 12px without)
+    local gap = (threatWidth > 0) and 24 or 12
     local requiredWidth = math.ceil(leftWidth + threatWidth + hpWidth + gap)
     
-    local targetWidth = math.max(baseWidth, requiredWidth)
+    -- When threat is visible, ensure bar is at least 115px wide so nothing feels cramped
+    local minWidth = (threatWidth > 0) and math.max(baseWidth, 115) or baseWidth
+    local targetWidth = math.max(minWidth, requiredWidth)
     if frame:GetWidth() ~= targetWidth then
         frame:SetWidth(targetWidth)
         if frame.aurasFrame then
@@ -313,19 +336,50 @@ function MP:UpdatePlateWidth(frame)
     MP:UpdateThreatAnchor(frame)
 end
 
--- Center threat text between level text and health text without dual-anchoring (prevents truncation)
+-- Center threat text between level text and health text with strict collision boundary clamping
 function MP:UpdateThreatAnchor(frame)
     if not frame or not frame.threatText or not frame.healthBar then return end
     
     local leftWidth = 0
-    if MP.db.showLevel then
+    if MP.db.showLevel and frame.levelText and frame.levelText:IsShown() then
         leftWidth = GetSafeStringWidth(frame.levelText)
+        if leftWidth <= 0 then leftWidth = 14 end
     end
     
-    local hpWidth = GetSafeStringWidth(frame.hpText)
+    local threatWidth = 0
+    if MP.db.enableThreat and frame.threatText:IsShown() then
+        threatWidth = GetSafeStringWidth(frame.threatText)
+        if threatWidth <= 0 then
+            local tText = frame.threatText:GetText()
+            if tText and tText ~= "" then threatWidth = 32 end
+        end
+    end
+    
+    local hpWidth = 0
+    if frame.hpText and frame.hpText:IsShown() then
+        hpWidth = GetSafeStringWidth(frame.hpText)
+        if hpWidth <= 0 then hpWidth = 50 end
+    end
+    
+    local barWidth = frame.healthBar:GetWidth() or frame:GetWidth() or 100
+    if barWidth < 50 then barWidth = 100 end
     
     -- Exact midpoint between levelText and hpText relative to healthBar center
     local xOffset = math.floor((leftWidth - hpWidth) / 2)
+    
+    -- Strict collision clamping:
+    -- Level is at LEFT + 3. Right edge of level is at -barWidth/2 + 3 + leftWidth.
+    -- HP is at RIGHT - 3. Left edge of HP is at barWidth/2 - 3 - hpWidth.
+    -- We enforce at least 4px padding between threatText and both neighbors:
+    local minCenter = - (barWidth / 2) + 3 + leftWidth + math.ceil(threatWidth / 2) + 4
+    local maxCenter = (barWidth / 2) - 3 - hpWidth - math.ceil(threatWidth / 2) - 4
+    
+    if minCenter < maxCenter then
+        xOffset = math.max(minCenter, math.min(maxCenter, xOffset))
+    else
+        xOffset = math.floor((minCenter + maxCenter) / 2)
+    end
+    
     frame.threatText:ClearAllPoints()
     frame.threatText:SetPoint("CENTER", frame.healthBar, "CENTER", xOffset, 0)
     frame.threatText:SetJustifyH("CENTER")
@@ -1950,11 +2004,6 @@ function MP:UpdateDebuffs(frame)
     local displayAuras = {}
     if frame.auraContainer then
         displayAuras = customAuras
-        if frame.aurasFrame then
-            frame.aurasFrame:ClearAllPoints()
-            local dSize = MP.db.debuffSize or 18
-            frame.aurasFrame:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16 + dSize + 2)
-        end
     else
         local auras = GetUnitAuraList(unit)
         if not auras then auras = {} end
@@ -1971,15 +2020,13 @@ function MP:UpdateDebuffs(frame)
                 table.insert(displayAuras, a)
             end
         end
-        if frame.aurasFrame then
-            frame.aurasFrame:ClearAllPoints()
-            frame.aurasFrame:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16)
-        end
     end
     
     local activeDebuffs = 0
     local maxLimit = MP.db.maxDebuffs or 5
     if maxLimit > 5 then maxLimit = 5 end
+    local dSize = MP.db.debuffSize or 20
+    local spacing = 2
     
     for _, aura in ipairs(displayAuras) do
         if activeDebuffs >= maxLimit then break end
@@ -1987,6 +2034,14 @@ function MP:UpdateDebuffs(frame)
         activeDebuffs = activeDebuffs + 1
         local iconFrame = frame.auraIcons and frame.auraIcons[activeDebuffs]
         if iconFrame then
+            iconFrame:ClearAllPoints()
+            if activeDebuffs == 1 then
+                iconFrame:SetPoint("LEFT", frame.aurasFrame, "LEFT", 0, 0)
+            else
+                iconFrame:SetPoint("LEFT", frame.auraIcons[activeDebuffs - 1], "RIGHT", spacing, 0)
+            end
+            iconFrame:SetSize(dSize, dSize)
+            
             local icon = aura.icon or aura.iconFileID
             if not icon and aura.spellId and not IsSecret(aura.spellId) then
                 if C_Spell and C_Spell.GetSpellTexture then
@@ -2037,10 +2092,22 @@ function MP:UpdateDebuffs(frame)
         end
     end
     
-    if activeDebuffs > 0 then
-        if frame.aurasFrame then frame.aurasFrame:Show() end
-    else
-        if frame.aurasFrame then frame.aurasFrame:Hide() end
+    if frame.aurasFrame then
+        if activeDebuffs > 0 then
+            local totalWidth = activeDebuffs * dSize + math.max(0, activeDebuffs - 1) * spacing
+            frame.aurasFrame:ClearAllPoints()
+            if frame.auraContainer and frame.auraContainer:IsShown() then
+                frame.aurasFrame:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
+            elseif frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
+                frame.aurasFrame:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
+            else
+                frame.aurasFrame:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
+            end
+            frame.aurasFrame:SetSize(totalWidth, dSize)
+            frame.aurasFrame:Show()
+        else
+            frame.aurasFrame:Hide()
+        end
     end
     
     -- Hide extra icons
@@ -2143,20 +2210,32 @@ function MP:ApplyAllSettings()
                     end
                 end
             end
-            frame.aurasFrame:SetSize(MP.db.width, dSize)
-            frame.aurasFrame:ClearAllPoints()
             if frame.auraContainer then
-                frame.aurasFrame:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16 + dSize + 2)
-            else
-                frame.aurasFrame:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16)
+                frame.auraContainer:ClearAllPoints()
+                if frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
+                    frame.auraContainer:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
+                else
+                    frame.auraContainer:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
+                end
             end
+            frame.aurasFrame:ClearAllPoints()
+            if frame.auraContainer and frame.auraContainer:IsShown() then
+                frame.aurasFrame:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
+            elseif frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
+                frame.aurasFrame:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
+            else
+                frame.aurasFrame:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
+            end
+            frame.aurasFrame:SetHeight(dSize)
             for i = 1, 5 do
                 if frame.auraIcons[i] then
                     frame.auraIcons[i]:SetSize(dSize, dSize)
                     if frame.auraIcons[i].count then frame.auraIcons[i].count:SetFont(fontPath, fSizeDebuff, "OUTLINE") end
                     if frame.auraIcons[i].cooldown then frame.auraIcons[i].cooldown:SetFont(fontPath, fSizeDebuff, "OUTLINE") end
-                    if i > 1 then
-                        frame.auraIcons[i]:ClearAllPoints()
+                    frame.auraIcons[i]:ClearAllPoints()
+                    if i == 1 then
+                        frame.auraIcons[i]:SetPoint("LEFT", frame.aurasFrame, "LEFT", 0, 0)
+                    else
                         frame.auraIcons[i]:SetPoint("LEFT", frame.auraIcons[i-1], "RIGHT", 2, 0)
                     end
                 end
@@ -2363,8 +2442,8 @@ local function CreateCustomPlate(namePlate)
             local cName = "MyPlatesAuraContainer" .. tostring(frame:GetName() or "") .. tostring(math.random(1000, 9999))
             local c = CreateFrame("AuraContainer", cName, frame, "CustomAuraContainerTemplate")
             c.auraButtons = {}
-            local dSize = MP.db.debuffSize or 28
-            c:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16)
+            local dSize = MP.db.debuffSize or 20
+            c:SetPoint("BOTTOM", frame.nameText or frame, "TOP", 0, 3)
             c:SetSize(MP.db.width or 120, dSize)
             c:SetFrameStrata(frame:GetFrameStrata())
             c:SetFrameLevel(frame:GetFrameLevel() + 25)
@@ -2496,13 +2575,15 @@ local function CreateCustomPlate(namePlate)
     
     -- Auras Frame (custom tracked abilities / classic fallback)
     local auras = CreateFrame("Frame", nil, frame)
-    local dSize = MP.db.debuffSize or 18
-    if frame.auraContainer then
-        auras:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16 + dSize + 2)
+    local dSize = MP.db.debuffSize or 20
+    if frame.auraContainer and frame.auraContainer:IsShown() then
+        auras:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
+    elseif frame.nameText then
+        auras:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
     else
-        auras:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 16)
+        auras:SetPoint("BOTTOM", health, "TOP", 0, 4)
     end
-    auras:SetSize(MP.db.width, MP.db.debuffSize or 20)
+    auras:SetSize(dSize, dSize)
     auras:SetFrameStrata(frame:GetFrameStrata())
     auras:SetFrameLevel(frame:GetFrameLevel() + 25)
     if auras.SetClipsChildren then
