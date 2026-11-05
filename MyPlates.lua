@@ -1972,31 +1972,21 @@ function MP:UpdateDebuffs(frame)
         end
     end
     
-    -- Target Spells (e.g. Seal/Judgement of Fury, /mptest)
-    local tSpell = nil
-    if isTarget and MP.activeTargetJudgement and now < MP.activeTargetJudgement.expirationTime then
-        tSpell = MP.activeTargetJudgement
-    end
-    if not tSpell then
-        local unitGUID = SafeCall(UnitGUID, unit)
-        if unitGUID and not IsSecret(unitGUID) and MP.activeTargetSpells then
-            tSpell = MP.activeTargetSpells[unitGUID]
+    -- Target Spells (strictly matched by mob unit GUID, never leaking across targets)
+    local unitGUID = SafeCall(UnitGUID, unit)
+    if unitGUID and not IsSecret(unitGUID) and MP.activeTargetSpells then
+        local tSpell = MP.activeTargetSpells[unitGUID]
+        if tSpell and now < tSpell.expirationTime then
+            table.insert(customAuras, {
+                name = tSpell.name or "Debuff",
+                icon = tSpell.icon or 135964,
+                duration = tSpell.duration,
+                expirationTime = tSpell.expirationTime,
+                applications = 1,
+            })
+        elseif tSpell and now >= tSpell.expirationTime then
+            MP.activeTargetSpells[unitGUID] = nil
         end
-    end
-    if not tSpell and isTarget and MP.activeTargetSpells then
-        local targetGUID = SafeCall(UnitGUID, "target")
-        if targetGUID and not IsSecret(targetGUID) then
-            tSpell = MP.activeTargetSpells[targetGUID]
-        end
-    end
-    if tSpell and now < tSpell.expirationTime then
-        table.insert(customAuras, {
-            name = tSpell.name or "Seal of Fury",
-            icon = tSpell.icon or 135964,
-            duration = tSpell.duration,
-            expirationTime = tSpell.expirationTime,
-            applications = 1,
-        })
     end
     
     -- If native C-Engine AuraContainer is active, frame.aurasFrame ONLY displays custom tracked abilities
@@ -2798,9 +2788,6 @@ f:SetScript("OnEvent", function(self, event, ...)
             MP.activePlates[unit] = nil
         end
     elseif event == "PLAYER_TARGET_CHANGED" then
-        if not UnitExists("target") then
-            MP.activeTargetJudgement = nil
-        end
         for _, frame in pairs(MP.activePlates) do
             MP:UpdateTargetHighlight(frame)
             MP:UpdateRaidIcon(frame)
@@ -2878,26 +2865,12 @@ f:SetScript("OnEvent", function(self, event, ...)
                             end
                         end
                     end)
-                elseif string.find(lower, "fury") or string.find(lower, "judg") or string.find(lower, "seal") or string.find(lower, "taunt") then
-                    local tex = GetSpellTextureSafe(actualSpellID, spellName) or 135964
-                    local dur = 10
-                    MP.activeTargetJudgement = {
-                        name = spellName,
-                        icon = tex,
-                        duration = dur,
-                        expirationTime = now + dur,
-                    }
-                    DelayCall(dur + 0.1, function()
-                        if MP.activeTargetJudgement and GetTime() >= MP.activeTargetJudgement.expirationTime then
-                            MP.activeTargetJudgement = nil
-                            for _, npFrame in pairs(MP.activePlates) do
-                                MP:UpdateDebuffs(npFrame)
-                            end
-                        end
-                    end)
-                    if UnitExists("target") then
+                elseif (string.find(lower, "judg") or string.find(lower, "taunt")) and not string.find(lower, "seal") and not string.find(lower, "righteous fury") then
+                    if UnitExists("target") and SafeCall(UnitCanAttack, "player", "target") then
                         local tGUID = SafeCall(UnitGUID, "target")
                         if tGUID and not IsSecret(tGUID) then
+                            local tex = GetSpellTextureSafe(actualSpellID, spellName) or 135964
+                            local dur = 10
                             MP.activeTargetSpells[tGUID] = {
                                 name = spellName,
                                 icon = tex,
@@ -3036,7 +3009,7 @@ f:SetScript("OnUpdate", function(self, elapsed)
     tickerElapsed = tickerElapsed + elapsed
     if tickerElapsed >= 0.25 then
         tickerElapsed = 0
-        local hasCustomSpells = (MP.activeConsecration ~= nil) or (MP.activeTargetJudgement ~= nil)
+        local hasCustomSpells = (MP.activeConsecration ~= nil) or (next(MP.activeTargetSpells) ~= nil)
         if hasCustomSpells or not HasAuraContainerSupport() then
             for _, frame in pairs(MP.activePlates) do
                 if frame and frame.unit and frame:IsShown() then
@@ -3061,7 +3034,9 @@ SlashCmdList["MYPLATESDEBUG"] = function(msg)
         tostring(playerSpells["seal of fury"] or playerSpells["judgement of fury"] or playerSpells["fury"])))
     print("  C_UnitAuras.GetUnitAuras:", (C_UnitAuras and C_UnitAuras.GetUnitAuras) and "|cff00ff00YES|r" or "|cffff0000NO|r")
     print("  activeConsecration:", MP.activeConsecration and ("|cff00ff00Active (" .. math.max(0, math.floor(MP.activeConsecration.expirationTime - GetTime())) .. "s)|r") or "None")
-    print("  activeTargetJudgement:", MP.activeTargetJudgement and ("|cff00ff00Active (" .. math.max(0, math.floor(MP.activeTargetJudgement.expirationTime - GetTime())) .. "s)|r") or "None")
+    local countTargetSpells = 0
+    for _ in pairs(MP.activeTargetSpells) do countTargetSpells = countTargetSpells + 1 end
+    print("  activeTargetSpells:", tostring(countTargetSpells))
     print("  Active Registered Plates:", tostring(#C_NamePlate.GetNamePlates()))
     
     if not UnitExists("target") then
@@ -3110,12 +3085,15 @@ SlashCmdList["MYPLATESTEST"] = function(msg)
         print("|cff00ff00[MyPlates Test]|r Target nameplate found! Injecting 15s test debuff icon...")
     end
     
-    MP.activeTargetJudgement = {
-        name = "Test Debuff",
-        icon = 135964, -- Paladin Judgement texture
-        duration = 15,
-        expirationTime = GetTime() + 15,
-    }
+    local tGUID = SafeCall(UnitGUID, "target")
+    if tGUID and not IsSecret(tGUID) then
+        MP.activeTargetSpells[tGUID] = {
+            name = "Test Debuff",
+            icon = 135964, -- Paladin Judgement texture
+            duration = 15,
+            expirationTime = GetTime() + 15,
+        }
+    end
     
     if targetPlate then
         MP:UpdateDebuffs(targetPlate)
