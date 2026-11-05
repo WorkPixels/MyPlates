@@ -2096,13 +2096,11 @@ function MP:UpdateDebuffs(frame)
         if activeDebuffs > 0 then
             local totalWidth = activeDebuffs * dSize + math.max(0, activeDebuffs - 1) * spacing
             frame.aurasFrame:ClearAllPoints()
+            local yOffset = (MP.db.fontSizeName or 11) + 6
             if frame.auraContainer and frame.auraContainer:IsShown() then
-                frame.aurasFrame:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
-            elseif frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
-                frame.aurasFrame:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
-            else
-                frame.aurasFrame:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
+                yOffset = yOffset + dSize + 2
             end
+            frame.aurasFrame:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
             frame.aurasFrame:SetSize(totalWidth, dSize)
             frame.aurasFrame:Show()
         else
@@ -2212,20 +2210,15 @@ function MP:ApplyAllSettings()
             end
             if frame.auraContainer then
                 frame.auraContainer:ClearAllPoints()
-                if frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
-                    frame.auraContainer:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
-                else
-                    frame.auraContainer:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
-                end
+                local cOffset = (MP.db.fontSizeName or 11) + 6
+                frame.auraContainer:SetPoint("BOTTOM", frame, "TOP", 0, cOffset)
             end
             frame.aurasFrame:ClearAllPoints()
+            local yOffset = (MP.db.fontSizeName or 11) + 6
             if frame.auraContainer and frame.auraContainer:IsShown() then
-                frame.aurasFrame:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
-            elseif frame.nameText and frame.nameText:IsShown() and frame.nameText:GetText() ~= "" then
-                frame.aurasFrame:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
-            else
-                frame.aurasFrame:SetPoint("BOTTOM", frame.healthBar, "TOP", 0, 4)
+                yOffset = yOffset + dSize + 2
             end
+            frame.aurasFrame:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
             frame.aurasFrame:SetHeight(dSize)
             for i = 1, 5 do
                 if frame.auraIcons[i] then
@@ -2443,7 +2436,7 @@ local function CreateCustomPlate(namePlate)
             local c = CreateFrame("AuraContainer", cName, frame, "CustomAuraContainerTemplate")
             c.auraButtons = {}
             local dSize = MP.db.debuffSize or 20
-            c:SetPoint("BOTTOM", frame.nameText or frame, "TOP", 0, 3)
+            c:SetPoint("BOTTOM", frame, "TOP", 0, (MP.db.fontSizeName or 11) + 6)
             c:SetSize(MP.db.width or 120, dSize)
             c:SetFrameStrata(frame:GetFrameStrata())
             c:SetFrameLevel(frame:GetFrameLevel() + 25)
@@ -2576,13 +2569,8 @@ local function CreateCustomPlate(namePlate)
     -- Auras Frame (custom tracked abilities / classic fallback)
     local auras = CreateFrame("Frame", nil, frame)
     local dSize = MP.db.debuffSize or 20
-    if frame.auraContainer and frame.auraContainer:IsShown() then
-        auras:SetPoint("BOTTOM", frame.auraContainer, "TOP", 0, 2)
-    elseif frame.nameText then
-        auras:SetPoint("BOTTOM", frame.nameText, "TOP", 0, 3)
-    else
-        auras:SetPoint("BOTTOM", health, "TOP", 0, 4)
-    end
+    local yOffset = (MP.db.fontSizeName or 11) + 6
+    auras:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
     auras:SetSize(dSize, dSize)
     auras:SetFrameStrata(frame:GetFrameStrata())
     auras:SetFrameLevel(frame:GetFrameLevel() + 25)
