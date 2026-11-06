@@ -2020,7 +2020,7 @@ function MP:UpdateDebuffs(frame)
         if iconFrame then
             iconFrame:ClearAllPoints()
             if activeDebuffs == 1 then
-                iconFrame:SetPoint("LEFT", frame.aurasFrame, "LEFT", 0, 0)
+                iconFrame:SetPoint("BOTTOMLEFT", frame.aurasFrame, "BOTTOMLEFT", 0, 0)
             else
                 iconFrame:SetPoint("LEFT", frame.auraIcons[activeDebuffs - 1], "RIGHT", spacing, 0)
             end
@@ -2084,7 +2084,7 @@ function MP:UpdateDebuffs(frame)
             if frame.auraContainer and frame.auraContainer:IsShown() then
                 yOffset = yOffset + dSize + 2
             end
-            pcall(frame.aurasFrame.SetPoint, frame.aurasFrame, "BOTTOM", frame, "TOP", 0, yOffset)
+            pcall(frame.aurasFrame.SetPoint, frame.aurasFrame, "BOTTOMLEFT", frame, "TOPLEFT", 0, yOffset)
             pcall(frame.aurasFrame.SetSize, frame.aurasFrame, totalWidth, dSize)
             frame.aurasFrame:Show()
         else
@@ -2195,14 +2195,14 @@ function MP:ApplyAllSettings()
             if frame.auraContainer then
                 frame.auraContainer:ClearAllPoints()
                 local cOffset = (MP.db.fontSizeName or 11) + 6
-                frame.auraContainer:SetPoint("BOTTOM", frame, "TOP", 0, cOffset)
+                frame.auraContainer:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, cOffset)
             end
             frame.aurasFrame:ClearAllPoints()
             local yOffset = (MP.db.fontSizeName or 11) + 6
             if frame.auraContainer and frame.auraContainer:IsShown() then
                 yOffset = yOffset + dSize + 2
             end
-            frame.aurasFrame:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
+            frame.aurasFrame:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, yOffset)
             frame.aurasFrame:SetHeight(dSize)
             for i = 1, 5 do
                 if frame.auraIcons[i] then
@@ -2211,7 +2211,7 @@ function MP:ApplyAllSettings()
                     if frame.auraIcons[i].cooldown then frame.auraIcons[i].cooldown:SetFont(fontPath, fSizeDebuff, "OUTLINE") end
                     frame.auraIcons[i]:ClearAllPoints()
                     if i == 1 then
-                        frame.auraIcons[i]:SetPoint("LEFT", frame.aurasFrame, "LEFT", 0, 0)
+                        frame.auraIcons[i]:SetPoint("BOTTOMLEFT", frame.aurasFrame, "BOTTOMLEFT", 0, 0)
                     else
                         frame.auraIcons[i]:SetPoint("LEFT", frame.auraIcons[i-1], "RIGHT", 2, 0)
                     end
@@ -2420,7 +2420,7 @@ local function CreateCustomPlate(namePlate)
             local c = CreateFrame("AuraContainer", cName, frame, "CustomAuraContainerTemplate")
             c.auraButtons = {}
             local dSize = MP.db.debuffSize or 20
-            c:SetPoint("BOTTOM", frame, "TOP", 0, (MP.db.fontSizeName or 11) + 6)
+            c:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, (MP.db.fontSizeName or 11) + 6)
             c:SetSize(MP.db.width or 120, dSize)
             c:SetFrameStrata(frame:GetFrameStrata())
             c:SetFrameLevel(frame:GetFrameLevel() + 25)
@@ -2554,7 +2554,7 @@ local function CreateCustomPlate(namePlate)
     local auras = CreateFrame("Frame", nil, frame)
     local dSize = MP.db.debuffSize or 20
     local yOffset = (MP.db.fontSizeName or 11) + 6
-    auras:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
+    auras:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, yOffset)
     auras:SetSize(dSize, dSize)
     auras:SetFrameStrata(frame:GetFrameStrata())
     auras:SetFrameLevel(frame:GetFrameLevel() + 25)
