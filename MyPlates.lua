@@ -325,12 +325,6 @@ function MP:UpdatePlateWidth(frame)
     local targetWidth = math.max(minWidth, requiredWidth)
     if frame:GetWidth() ~= targetWidth then
         frame:SetWidth(targetWidth)
-        if frame.aurasFrame then
-            frame.aurasFrame:SetWidth(targetWidth)
-        end
-        if frame.auraContainer then
-            frame.auraContainer:SetWidth(targetWidth)
-        end
     end
     
     MP:UpdateThreatAnchor(frame)
