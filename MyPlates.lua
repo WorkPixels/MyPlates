@@ -967,7 +967,7 @@ local function HideBlizzardPlate(namePlate)
         HookAndSuppressBlizzardFrame(namePlate.unitFrame)
     end
     for _, child in ipairs({ namePlate:GetChildren() }) do
-        if child ~= namePlate.mpFrame and not child:IsForbidden() then
+        if child ~= namePlate.mpFrame and not child.isMyQuestPlates and not child.isQuestPlate and not child:IsForbidden() then
             if child.HealthBarsContainer or child.healthBar or child.castBar then
                 HookAndSuppressBlizzardFrame(child)
             else
@@ -2090,8 +2090,8 @@ function MP:UpdateDebuffs(frame)
             if frame.auraContainer and frame.auraContainer:IsShown() then
                 yOffset = yOffset + dSize + 2
             end
-            frame.aurasFrame:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
-            frame.aurasFrame:SetSize(totalWidth, dSize)
+            pcall(frame.aurasFrame.SetPoint, frame.aurasFrame, "BOTTOM", frame, "TOP", 0, yOffset)
+            pcall(frame.aurasFrame.SetSize, frame.aurasFrame, totalWidth, dSize)
             frame.aurasFrame:Show()
         else
             frame.aurasFrame:Hide()
@@ -2759,6 +2759,9 @@ f:SetScript("OnEvent", function(self, event, ...)
             MP.activePlates[unit] = frame
             frame:Show()
             MP:UpdateAll(frame)
+            if _G.MyQuestPlates and _G.MyQuestPlates.UpdateNamePlate then
+                pcall(_G.MyQuestPlates.UpdateNamePlate, unit)
+            end
         end
     elseif event == "NAME_PLATE_UNIT_REMOVED" then
         local unit = ...

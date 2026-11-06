@@ -2,7 +2,7 @@
 ## Title: MyPlates
 ## Notes: Clean, customizable, and easy-to-use nameplates.
 ## SavedVariables: MyPlatesDB
-## Version: 1.0.6
+## Version: 1.0.7
 ## Author: Antigravity
 
 MyPlates.lua
