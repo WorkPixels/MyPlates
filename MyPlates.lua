@@ -273,109 +273,35 @@ local function GetSafeStringWidth(fontString)
     end
     local ok, w = pcall(fontString.GetStringWidth, fontString)
     if ok and not IsSecret(w) and type(w) == "number" and w > 0 then
-        return w
+        return math.ceil(w * 1.1)
     end
     local okText, text = pcall(fontString.GetText, fontString)
     if okText and text and not IsSecret(text) and type(text) == "string" and #text > 0 then
         local _, fontHeight = fontString:GetFont()
-        local charWidth = (fontHeight or 10) * 0.65
+        local charWidth = (fontHeight or 10) * 0.75
         return math.ceil(#text * charWidth)
+    end
+    if fontString.estimatedWidth and fontString.estimatedWidth > 0 then
+        return fontString.estimatedWidth
     end
     return 0
 end
 
--- Dynamic health bar width: automatically lengthens the plate if text is wide so level, threat, and health never overlap
+-- Standard health bar width respecting user setting
 function MP:UpdatePlateWidth(frame)
     if not frame or not frame.unit then return end
-    local baseWidth = MP.db.width or 100
-    
-    local leftWidth = 0
-    if MP.db.showLevel and frame.levelText and frame.levelText:IsShown() then
-        leftWidth = GetSafeStringWidth(frame.levelText)
-        if leftWidth <= 0 then
-            leftWidth = 14
-        end
-    end
-    
-    local threatWidth = 0
-    if MP.db.enableThreat and frame.threatText and frame.threatText:IsShown() then
-        threatWidth = GetSafeStringWidth(frame.threatText)
-        if threatWidth <= 0 then
-            local tText = frame.threatText:GetText()
-            if tText and tText ~= "" then
-                threatWidth = 32
-            end
-        end
-    end
-    
-    local hpWidth = 0
-    if frame.hpText and frame.hpText:IsShown() then
-        hpWidth = GetSafeStringWidth(frame.hpText)
-        if hpWidth <= 0 then
-            hpWidth = 50 -- Fallback width for typical health string "100 (100%)" or "26 (26%)"
-        end
-    end
-    
-    -- Margins: 3px borders + generous ~8px gaps between each text element (24px with threat, 12px without)
-    local gap = (threatWidth > 0) and 24 or 12
-    local requiredWidth = math.ceil(leftWidth + threatWidth + hpWidth + gap)
-    
-    -- When threat is visible, ensure bar is at least 115px wide so nothing feels cramped
-    local minWidth = (threatWidth > 0) and math.max(baseWidth, 115) or baseWidth
-    local targetWidth = math.max(minWidth, requiredWidth)
+    local targetWidth = MP.db.width or 100
     if frame:GetWidth() ~= targetWidth then
         frame:SetWidth(targetWidth)
     end
-    
     MP:UpdateThreatAnchor(frame)
 end
 
--- Center threat text between level text and health text with strict collision boundary clamping
+-- Threat % anchored directly in the middle of the health bar
 function MP:UpdateThreatAnchor(frame)
     if not frame or not frame.threatText or not frame.healthBar then return end
-    
-    local leftWidth = 0
-    if MP.db.showLevel and frame.levelText and frame.levelText:IsShown() then
-        leftWidth = GetSafeStringWidth(frame.levelText)
-        if leftWidth <= 0 then leftWidth = 14 end
-    end
-    
-    local threatWidth = 0
-    if MP.db.enableThreat and frame.threatText:IsShown() then
-        threatWidth = GetSafeStringWidth(frame.threatText)
-        if threatWidth <= 0 then
-            local tText = frame.threatText:GetText()
-            if tText and tText ~= "" then threatWidth = 32 end
-        end
-    end
-    
-    local hpWidth = 0
-    if frame.hpText and frame.hpText:IsShown() then
-        hpWidth = GetSafeStringWidth(frame.hpText)
-        if hpWidth <= 0 then hpWidth = 50 end
-    end
-    
-    local barWidth = frame.healthBar:GetWidth() or frame:GetWidth() or 100
-    if barWidth < 50 then barWidth = 100 end
-    
-    -- Exact midpoint between levelText and hpText relative to healthBar center
-    local xOffset = math.floor((leftWidth - hpWidth) / 2)
-    
-    -- Strict collision clamping:
-    -- Level is at LEFT + 3. Right edge of level is at -barWidth/2 + 3 + leftWidth.
-    -- HP is at RIGHT - 3. Left edge of HP is at barWidth/2 - 3 - hpWidth.
-    -- We enforce at least 4px padding between threatText and both neighbors:
-    local minCenter = - (barWidth / 2) + 3 + leftWidth + math.ceil(threatWidth / 2) + 4
-    local maxCenter = (barWidth / 2) - 3 - hpWidth - math.ceil(threatWidth / 2) - 4
-    
-    if minCenter < maxCenter then
-        xOffset = math.max(minCenter, math.min(maxCenter, xOffset))
-    else
-        xOffset = math.floor((minCenter + maxCenter) / 2)
-    end
-    
     frame.threatText:ClearAllPoints()
-    frame.threatText:SetPoint("CENTER", frame.healthBar, "CENTER", xOffset, 0)
+    frame.threatText:SetPoint("CENTER", frame.healthBar, "CENTER", 0, 0)
     frame.threatText:SetJustifyH("CENTER")
 end
 
@@ -1402,8 +1328,8 @@ function MP:UpdateThreat(frame)
                     displayPercentage = 100 - secondThreat
                     isLead = true
                 else
-                    -- Solo or nobody else has threat: blank text like TBC!
-                    displayPercentage = 0
+                    -- Solo or nobody else has threat: show 100% full aggro
+                    displayPercentage = 100
                     isLead = false
                 end
             else
@@ -1419,19 +1345,26 @@ function MP:UpdateThreat(frame)
                     displayPercentage = -130
                 end
                 
+                local newText
                 if isLead then
                     if displayPercentage >= 0 then
-                        frame.threatText:SetText(format("+%d%%", floor(displayPercentage)))
+                        newText = format("+%d%%", floor(displayPercentage))
                     else
-                        frame.threatText:SetText(format("%d%%", floor(displayPercentage)))
+                        newText = format("%d%%", floor(displayPercentage))
                     end
                 else
-                    frame.threatText:SetText(format("%d%%", floor(displayPercentage)))
+                    newText = format("%d%%", floor(displayPercentage))
                 end
                 
                 local r, g, b = MP:GetThreatColor(status, displayPercentage, MP.db.tankMode, isLead)
+                local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
                 frame.threatText:SetTextColor(r, g, b)
-                MP:UpdatePlateWidth(frame)
+                if frame.threatText:GetText() ~= newText then
+                    frame.threatText:SetText(newText)
+                    if not hadThreat then
+                        MP:UpdateHealth(frame)
+                    end
+                end
                 return
             end
         else
@@ -1439,18 +1372,21 @@ function MP:UpdateThreat(frame)
             local pctVal = NormalizePct(scaledPercentage, rawPercentage)
             if pctVal and pctVal > 0 then
                 if pctVal > 130 then pctVal = 130 end
-                local okSet = pcall(frame.threatText.SetFormattedText, frame.threatText, "%d%%", pctVal)
-                if not okSet then
-                    pcall(frame.threatText.SetText, frame.threatText, pctVal)
-                end
+                local newText = format("%d%%", floor(pctVal))
                 frame.threatText:SetTextColor(0.9, 0.8, 0.2)
-                MP:UpdatePlateWidth(frame)
+                if frame.threatText:GetText() ~= newText then
+                    frame.threatText:SetText(newText)
+                    MP:UpdateHealth(frame)
+                end
                 return
             end
         end
     end
-    frame.threatText:SetText("")
-    MP:UpdatePlateWidth(frame)
+    local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+    if hadThreat then
+        frame.threatText:SetText("")
+        MP:UpdateHealth(frame)
+    end
 end
 
 -- Update health and health text
@@ -1476,6 +1412,8 @@ function MP:UpdateHealth(frame)
     
     local isTarget = SafeCall(UnitIsUnit, unit, "target")
     local displaySet = false
+    local hasThreat = MP.db.enableThreat and frame.threatText and frame.threatText:IsShown() and (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+    local compactHp = hasThreat and ((frame:GetWidth() or 100) < 135)
     
     -- Priority 1: If this plate is our target, query "target" for reliable non-secret health numbers
     if isTarget then
@@ -1485,12 +1423,16 @@ function MP:UpdateHealth(frame)
             frame.lastKnownMaxHp = tMax
             frame.lastKnownHp = tHp
             local percent = floor((tHp / tMax) * 100)
-            if tHp >= 1000000 then
-                frame.hpText:SetText(format("%.1fM (%d%%)", tHp / 1000000, percent))
-            elseif tHp >= 1000 then
-                frame.hpText:SetText(format("%.1fk (%d%%)", tHp / 1000, percent))
+            if compactHp then
+                frame.hpText:SetText(format("(%d%%)", percent))
             else
-                frame.hpText:SetText(format("%d (%d%%)", tHp, percent))
+                if tHp >= 1000000 then
+                    frame.hpText:SetText(format("%.1fM (%d%%)", tHp / 1000000, percent))
+                elseif tHp >= 1000 then
+                    frame.hpText:SetText(format("%.1fk (%d%%)", tHp / 1000, percent))
+                else
+                    frame.hpText:SetText(format("%d (%d%%)", tHp, percent))
+                end
             end
             displaySet = true
         end
@@ -1499,12 +1441,16 @@ function MP:UpdateHealth(frame)
     -- Priority 2: If hp and maxHp on unit are non-secret numbers, format normally
     if not displaySet and not IsSecret(hp) and not IsSecret(maxHp) and hp and maxHp then
         local percent = maxHp > 0 and floor((hp / maxHp) * 100) or 0
-        if hp >= 1000000 then
-            frame.hpText:SetText(format("%.1fM (%d%%)", hp / 1000000, percent))
-        elseif hp >= 1000 then
-            frame.hpText:SetText(format("%.1fk (%d%%)", hp / 1000, percent))
+        if compactHp then
+            frame.hpText:SetText(format("(%d%%)", percent))
         else
-            frame.hpText:SetText(format("%d (%d%%)", hp, percent))
+            if hp >= 1000000 then
+                frame.hpText:SetText(format("%.1fM (%d%%)", hp / 1000000, percent))
+            elseif hp >= 1000 then
+                frame.hpText:SetText(format("%.1fk (%d%%)", hp / 1000, percent))
+            else
+                frame.hpText:SetText(format("%d (%d%%)", hp, percent))
+            end
         end
         displaySet = true
     end
@@ -1519,9 +1465,12 @@ function MP:UpdateHealth(frame)
                 okP, hpPct = pcall(UnitHealthPercent, "target", false, curve)
             end
             if okP and hpPct then
-                local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "%s (%.0f%%)", hp, hpPct)
-                if okFmt then
-                    displayFormatted = true
+                if compactHp then
+                    local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "(%.0f%%)", hpPct)
+                    if okFmt then displayFormatted = true end
+                else
+                    local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "%s (%.0f%%)", hp, hpPct)
+                    if okFmt then displayFormatted = true end
                 end
             end
         end
@@ -1530,7 +1479,12 @@ function MP:UpdateHealth(frame)
             if not okFmt then
                 pcall(frame.hpText.SetText, frame.hpText, hp)
             end
+            frame.hpText.estimatedWidth = 55
+        else
+            frame.hpText.estimatedWidth = 85
         end
+    else
+        frame.hpText.estimatedWidth = 85
     end
     
     MP:UpdateDoTLethal(frame)
@@ -1617,42 +1571,51 @@ end
 
 -- Update raid target icons
 function MP:UpdateRaidIcon(frame)
+    if not frame or not frame.unit or not frame.raidIcon then return end
     local unit = frame.unit
-    if not unit then return end
     
-    local index
-    if SafeCall(UnitIsUnit, unit, "target") then
+    local index = SafeCall(GetRaidTargetIndex, unit)
+    if not index and SafeCall(UnitIsUnit, unit, "target") then
         index = SafeCall(GetRaidTargetIndex, "target")
-    elseif SafeCall(UnitIsUnit, unit, "mouseover") then
+    end
+    if not index and SafeCall(UnitIsUnit, unit, "mouseover") then
         index = SafeCall(GetRaidTargetIndex, "mouseover")
-    else
-        index = SafeCall(GetRaidTargetIndex, unit)
     end
     
     if not IsSecret(index) and index and index >= 1 and index <= 8 then
         if frame.raidIcon.currentIndex ~= index then
-            local left = ((index - 1) % 4) * 0.25
-            local right = left + 0.25
-            local top = floor((index - 1) / 4) * 0.25
-            local bottom = top + 0.25
-            
-            frame.raidIcon:SetTexCoord(left, right, top, bottom)
+            if SetRaidTargetIconTexture then
+                SetRaidTargetIconTexture(frame.raidIcon, index)
+            else
+                local left = ((index - 1) % 4) * 0.25
+                local right = left + 0.25
+                local top = floor((index - 1) / 4) * 0.25
+                local bottom = top + 0.25
+                frame.raidIcon:SetTexCoord(left, right, top, bottom)
+            end
             frame.raidIcon.currentIndex = index
         end
         
         -- Adjust position dynamically based on targeting status
         local isTarget = SafeCall(UnitIsUnit, unit, "target")
-        local targetOffset = (isTarget and MP.db.targetBrackets) and 22 or 8
+        local targetOffset = (isTarget and MP.db.targetBrackets) and 20 or 6
         if frame.raidIcon.currentOffset ~= targetOffset then
-            frame.raidIcon:ClearAllPoints()
-            frame.raidIcon:SetPoint("LEFT", frame.healthBar, "RIGHT", targetOffset, 0)
+            local iconContainer = frame.raidIconFrame or frame.raidIcon
+            iconContainer:ClearAllPoints()
+            iconContainer:SetPoint("LEFT", frame, "RIGHT", targetOffset, 0)
             frame.raidIcon.currentOffset = targetOffset
         end
         
+        if frame.raidIconFrame and not frame.raidIconFrame:IsShown() then
+            frame.raidIconFrame:Show()
+        end
         if not frame.raidIcon:IsShown() then
             frame.raidIcon:Show()
         end
     else
+        if frame.raidIconFrame and frame.raidIconFrame:IsShown() then
+            frame.raidIconFrame:Hide()
+        end
         if frame.raidIcon:IsShown() then
             frame.raidIcon:Hide()
             frame.raidIcon.currentIndex = nil
@@ -1872,6 +1835,7 @@ end
 
 -- Ground AoE and Custom Ability tracking (handles non-aura effects like Consecration and custom seals)
 MP.activeConsecration = nil
+MP.consecratedMobs = {}
 MP.activeTargetSpells = {}
 
 local function DelayCall(delay, callback)
@@ -1952,10 +1916,10 @@ function MP:UpdateDebuffs(frame)
     local now = GetTime()
     local customAuras = {}
     
-    -- Consecration tracking (ground AoE)
-    if MP.activeConsecration and now < MP.activeConsecration.expirationTime then
-        local canAttack = SafeCall(UnitCanAttack, "player", unit) or (UnitReaction(unit, "player") and UnitReaction(unit, "player") <= 4) or isTarget
-        if canAttack then
+    -- Consecration tracking (ground AoE): ONLY display on mobs actively taking damage from Consecration
+    local unitGUID = SafeCall(UnitGUID, unit)
+    if MP.activeConsecration and now < MP.activeConsecration.expirationTime and unitGUID and not IsSecret(unitGUID) then
+        if MP.consecratedMobs and MP.consecratedMobs[unitGUID] and now < MP.consecratedMobs[unitGUID] then
             table.insert(customAuras, {
                 name = MP.activeConsecration.name or "Consecration",
                 icon = MP.activeConsecration.icon or 135926,
@@ -2340,10 +2304,17 @@ local function CreateCustomPlate(namePlate)
     dragon:Hide()
     frame.dragonIcon = dragon
     
-    -- Raid Target Icon
-    local raidIcon = health:CreateTexture(nil, "OVERLAY")
-    raidIcon:SetSize(20, 20)
-    raidIcon:SetPoint("LEFT", health, "RIGHT", 8, 0)
+    -- Raid Target Icon (dedicated frame child of plate frame with high frame level to avoid StatusBar clipping)
+    local raidIconFrame = CreateFrame("Frame", nil, frame)
+    raidIconFrame:SetSize(22, 22)
+    raidIconFrame:SetPoint("LEFT", frame, "RIGHT", 8, 0)
+    raidIconFrame:SetFrameStrata(frame:GetFrameStrata())
+    raidIconFrame:SetFrameLevel(frame:GetFrameLevel() + 30)
+    raidIconFrame:Hide()
+    frame.raidIconFrame = raidIconFrame
+    
+    local raidIcon = raidIconFrame:CreateTexture(nil, "OVERLAY", nil, 7)
+    raidIcon:SetAllPoints(raidIconFrame)
     raidIcon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
     raidIcon:Hide()
     frame.raidIcon = raidIcon
@@ -2624,6 +2595,8 @@ SafeRegister("SPELLS_CHANGED")
 SafeRegister("NAME_PLATE_UNIT_ADDED")
 SafeRegister("NAME_PLATE_UNIT_REMOVED")
 SafeRegister("PLAYER_TARGET_CHANGED")
+SafeRegister("PLAYER_REGEN_ENABLED")
+SafeRegister("PLAYER_REGEN_DISABLED")
 SafeRegister("RAID_TARGET_UPDATE")
 SafeRegister("UNIT_HEALTH")
 SafeRegister("UNIT_MAXHEALTH")
@@ -2781,6 +2754,13 @@ f:SetScript("OnEvent", function(self, event, ...)
                     end
                 end
             end
+            if frame.raidIconFrame then
+                frame.raidIconFrame:Hide()
+            end
+            if frame.raidIcon then
+                frame.raidIcon:Hide()
+                frame.raidIcon.currentIndex = nil
+            end
             frame.unit = nil
             MP.activePlates[unit] = nil
         end
@@ -2819,7 +2799,14 @@ f:SetScript("OnEvent", function(self, event, ...)
         if frame then
             MP:UpdateName(frame)
         end
-    elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" then
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        MP.consecratedMobs = {}
+        MP.activeConsecration = nil
+        for _, frame in pairs(MP.activePlates) do
+            MP:UpdateThreat(frame)
+            MP:UpdateDebuffs(frame)
+        end
+    elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" or event == "PLAYER_REGEN_DISABLED" then
         local unit = ...
         if unit and MP.activePlates[unit] then
             MP:UpdateThreat(MP.activePlates[unit])
@@ -2854,9 +2841,11 @@ f:SetScript("OnEvent", function(self, event, ...)
                         duration = 8,
                         expirationTime = now + 8,
                     }
+                    MP.consecratedMobs = {}
                     DelayCall(8.1, function()
                         if MP.activeConsecration and GetTime() >= MP.activeConsecration.expirationTime then
                             MP.activeConsecration = nil
+                            MP.consecratedMobs = {}
                             for _, npFrame in pairs(MP.activePlates) do
                                 MP:UpdateDebuffs(npFrame)
                             end
@@ -2935,6 +2924,25 @@ f:SetScript("OnEvent", function(self, event, ...)
         else
             timestamp, eventType, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID = ...
         end
+        if (eventType == "SPELL_DAMAGE" or eventType == "SPELL_PERIODIC_DAMAGE") and sourceGUID == (MP.playerGUID or UnitGUID("player")) then
+            local spellId, spellName
+            if CombatLogGetCurrentEventInfo then
+                spellId, spellName = select(12, CombatLogGetCurrentEventInfo())
+            else
+                spellId, spellName = select(12, ...)
+            end
+            if spellName and string.find(strlower(spellName), "consecrat") and destGUID then
+                if not MP.consecratedMobs then MP.consecratedMobs = {} end
+                MP.consecratedMobs[destGUID] = GetTime() + 1.5
+                for unit, plateFrame in pairs(MP.activePlates) do
+                    if SafeCall(UnitGUID, unit) == destGUID then
+                        MP:UpdateDebuffs(plateFrame)
+                        break
+                    end
+                end
+            end
+        end
+
         
         if eventType == "SPELL_PERIODIC_DAMAGE" and sourceGUID then
             local isMyDot = sourceGUID == (MP.playerGUID or UnitGUID("player"))
@@ -3014,6 +3022,22 @@ f:SetScript("OnUpdate", function(self, elapsed)
                 end
             end
         end
+        
+        -- Periodically refresh raid target markers so external or macro marks show immediately
+        for _, frame in pairs(MP.activePlates) do
+            if frame and frame.unit and frame:IsShown() then
+                MP:UpdateRaidIcon(frame)
+            end
+        end
+        
+        -- In combat, periodically refresh threat across all active plates so non-targets update smoothly
+        if MP.db.enableThreat and (SafeCall(UnitAffectingCombat, "player") or InCombatLockdown()) then
+            for _, frame in pairs(MP.activePlates) do
+                if frame and frame.unit and frame:IsShown() then
+                    MP:UpdateThreat(frame)
+                end
+            end
+        end
     end
 end)
 
@@ -3058,6 +3082,11 @@ SlashCmdList["MYPLATESDEBUG"] = function(msg)
         else
             print("  |cffff0000Target auraContainer:|r None (using fallback frame)")
         end
+        local rIdx = GetRaidTargetIndex and (GetRaidTargetIndex(targetFrame.unit or "target") or GetRaidTargetIndex("target"))
+        print(string.format("  Raid Marker: index=%s | shown=%s | frameLevel=%s",
+            tostring(rIdx),
+            tostring(targetFrame.raidIcon and targetFrame.raidIcon:IsShown()),
+            tostring(targetFrame.raidIconFrame and targetFrame.raidIconFrame:GetFrameLevel())))
         print("|cff00ff00aurasFrame shown:|r", targetFrame.aurasFrame and targetFrame.aurasFrame:IsShown() and "|cff00ff00YES|r" or "|cffff0000NO|r")
         for i = 1, 5 do
             local icon = targetFrame.auraIcons and targetFrame.auraIcons[i]
