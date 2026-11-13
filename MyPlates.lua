@@ -318,12 +318,38 @@ local function NormalizePct(scaledPct, rawPct)
     return 0
 end
 
+-- Helper: Resolve the highest-priority unit token matching a nameplate (target/focus/mouseover/group target)
+local function ResolveBestUnitToken(unit)
+    if not unit then return unit end
+    if SafeCall(UnitIsUnit, unit, "target") then
+        return "target"
+    elseif SafeCall(UnitIsUnit, unit, "focus") then
+        return "focus"
+    elseif SafeCall(UnitIsUnit, unit, "mouseover") then
+        return "mouseover"
+    elseif IsInRaid() then
+        local num = GetNumGroupMembers() or 0
+        for i = 1, num do
+            local tUnit = "raid" .. i .. "target"
+            if SafeCall(UnitExists, tUnit) and SafeCall(UnitIsUnit, unit, tUnit) then
+                return tUnit
+            end
+        end
+    elseif IsInGroup() then
+        local num = GetNumSubgroupMembers() or 0
+        for i = 1, num do
+            local tUnit = "party" .. i .. "target"
+            if SafeCall(UnitExists, tUnit) and SafeCall(UnitIsUnit, unit, tUnit) then
+                return tUnit
+            end
+        end
+    end
+    return unit
+end
+
 -- Helper: Get threat situation safely guarded against secret values and targeting proxy
 local function SafeThreat(unit)
-    local checkUnit = unit
-    if SafeCall(UnitIsUnit, unit, "target") then
-        checkUnit = "target"
-    end
+    local checkUnit = ResolveBestUnitToken(unit)
     
     local status, isTanking, scaledPct, rawPct
     
@@ -1250,27 +1276,22 @@ end
 -- Get highest threat percentage among other group members relative to player/tank
 function MP:GetHighestGroupThreat(unit)
     local maxPct = 0
-    local checkUnit = SafeCall(UnitIsUnit, unit, "target") and "target" or unit
+    local checkUnit = ResolveBestUnitToken(unit)
     
     local function CheckUnitThreat(groupUnit)
         if groupUnit and not SafeCall(UnitIsUnit, groupUnit, "player") and SafeCall(UnitExists, groupUnit) then
             local ok, isTanking, status, scaledPct, rawPct = pcall(UnitDetailedThreatSituation, groupUnit, checkUnit)
-            if not ok or status == nil then
-                local ok2, uStatus, uScaled, uRaw = pcall(UnitThreatSituation, groupUnit, checkUnit)
-                if (not ok2 or uStatus == nil) and checkUnit ~= unit then
-                    ok2, uStatus, uScaled, uRaw = pcall(UnitThreatSituation, groupUnit, unit)
-                end
-                if ok2 and uStatus ~= nil then
-                    scaledPct = uScaled
-                    rawPct = uRaw
-                end
+            if (not ok or status == nil) and checkUnit ~= unit then
+                ok, isTanking, status, scaledPct, rawPct = pcall(UnitDetailedThreatSituation, groupUnit, unit)
             end
-            local pct = NormalizePct(scaledPct, rawPct)
-            if pct and pct > 100 then
-                pct = 100
-            end
-            if pct and pct > maxPct then
-                maxPct = pct
+            if ok and status ~= nil then
+                local pct = NormalizePct(scaledPct, rawPct)
+                if pct and pct > 100 then
+                    pct = 100
+                end
+                if pct and pct > maxPct then
+                    maxPct = pct
+                end
             end
         end
     end
@@ -1309,7 +1330,11 @@ function MP:UpdateThreat(frame)
     
     -- Sync threat percentage display
     if not MP.db.enableThreat then
+        local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
         frame.threatText:SetText("")
+        if hadThreat then
+            MP:UpdateHealth(frame)
+        end
         return
     end
     
@@ -1412,7 +1437,8 @@ function MP:UpdateHealth(frame)
     
     local isTarget = SafeCall(UnitIsUnit, unit, "target")
     local displaySet = false
-    local hasThreat = MP.db.enableThreat and frame.threatText and frame.threatText:IsShown() and (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+    local tText = frame.threatText and frame.threatText:GetText()
+    local hasThreat = MP.db.enableThreat and tText and (tText ~= "")
     local compactHp = hasThreat and ((frame:GetWidth() or 100) < 135)
     
     -- Priority 1: If this plate is our target, query "target" for reliable non-secret health numbers
@@ -1583,42 +1609,41 @@ function MP:UpdateRaidIcon(frame)
     end
     
     if not IsSecret(index) and index and index >= 1 and index <= 8 then
-        if frame.raidIcon.currentIndex ~= index then
-            if SetRaidTargetIconTexture then
-                SetRaidTargetIconTexture(frame.raidIcon, index)
-            else
-                local left = ((index - 1) % 4) * 0.25
-                local right = left + 0.25
-                local top = floor((index - 1) / 4) * 0.25
-                local bottom = top + 0.25
-                frame.raidIcon:SetTexCoord(left, right, top, bottom)
-            end
-            frame.raidIcon.currentIndex = index
+        -- Set texture on frame.raidIcon directly
+        local texOk = pcall(frame.raidIcon.SetTexture, frame.raidIcon, "Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+        if not texOk or not frame.raidIcon:GetTexture() then
+            pcall(frame.raidIcon.SetTexture, frame.raidIcon, "Interface\\TargetingFrame\\UI-RaidTargetingIcons.blp")
         end
         
-        -- Adjust position dynamically based on targeting status
-        local isTarget = SafeCall(UnitIsUnit, unit, "target")
-        local targetOffset = (isTarget and MP.db.targetBrackets) and 20 or 6
-        if frame.raidIcon.currentOffset ~= targetOffset then
-            local iconContainer = frame.raidIconFrame or frame.raidIcon
-            iconContainer:ClearAllPoints()
-            iconContainer:SetPoint("LEFT", frame, "RIGHT", targetOffset, 0)
-            frame.raidIcon.currentOffset = targetOffset
+        -- Exact coordinate mapping for 4x4 sprite grid:
+        -- 1=Star, 2=Circle, 3=Diamond, 4=Triangle, 5=Moon, 6=Square, 7=Cross, 8=Skull
+        local left = ((index - 1) % 4) * 0.25
+        local right = left + 0.25
+        local top = floor((index - 1) / 4) * 0.25
+        local bottom = top + 0.25
+        frame.raidIcon:SetTexCoord(left, right, top, bottom)
+        frame.raidIcon.currentIndex = index
+        
+        -- Position dynamically: centered above plate/name, or above debuffs if debuffs are active
+        local yOffset = (MP.db.fontSizeName or 11) + 4
+        if frame.aurasFrame and frame.aurasFrame:IsShown() and (frame.activeDebuffs and frame.activeDebuffs > 0) then
+            local dSize = MP.db.debuffSize or 20
+            yOffset = yOffset + dSize + 4
+        end
+        if frame.raidIcon.currentYOffset ~= yOffset then
+            frame.raidIcon:ClearAllPoints()
+            frame.raidIcon:SetPoint("BOTTOM", frame, "TOP", 0, yOffset)
+            frame.raidIcon.currentYOffset = yOffset
         end
         
-        if frame.raidIconFrame and not frame.raidIconFrame:IsShown() then
-            frame.raidIconFrame:Show()
-        end
         if not frame.raidIcon:IsShown() then
             frame.raidIcon:Show()
         end
     else
-        if frame.raidIconFrame and frame.raidIconFrame:IsShown() then
-            frame.raidIconFrame:Hide()
-        end
         if frame.raidIcon:IsShown() then
             frame.raidIcon:Hide()
             frame.raidIcon.currentIndex = nil
+            frame.raidIcon.currentYOffset = nil
         end
     end
 end
@@ -1713,8 +1738,7 @@ function MP:StartCast(frame, unit)
         return
     end
     
-    local isTarget = SafeCall(UnitIsUnit, unit, "target")
-    local checkUnit = isTarget and "target" or unit
+    local checkUnit = ResolveBestUnitToken(unit)
     
     local okCast, name, text, texture, startTimeMS, endTimeMS, isTradeSkill, castID, notInterruptible = pcall(UnitCastingInfo, checkUnit)
     local channeling = false
@@ -1740,12 +1764,18 @@ function MP:StartCast(frame, unit)
     end
     
     if not hasCast then
+        -- Preserve active combat-log fallback casts until they finish or are interrupted
+        if frame.castBar:IsShown() and frame.castBar.isCombatLogCast and frame.castBar.endTime and (GetTime() * 1000) < frame.castBar.endTime then
+            return
+        end
+        frame.castBar.isCombatLogCast = false
         frame.castBar:Hide()
         frame.castBar:SetScript("OnUpdate", nil)
         return
     end
     
     local castBar = frame.castBar
+    castBar.isCombatLogCast = false
     castBar.channeling = channeling
     
     -- Set spell name text (FontString:SetText natively handles secret strings)
@@ -1798,8 +1828,37 @@ function MP:StartCast(frame, unit)
     castBar:Show()
 end
 
+function MP:StartCombatLogCast(frame, spellName, icon, castTimeMS)
+    if not MP.db.showCastBar or not frame or not frame.castBar or not castTimeMS or castTimeMS <= 0 then
+        return
+    end
+    local castBar = frame.castBar
+    -- Never override an authoritative native UnitCastingInfo bar
+    if castBar:IsShown() and not castBar.isCombatLogCast then
+        return
+    end
+    local nowMS = GetTime() * 1000
+    local duration = castTimeMS / 1000
+    castBar.isCombatLogCast = true
+    castBar.channeling = false
+    castBar.isSecretTimes = false
+    castBar.startTime = nowMS
+    castBar.endTime = nowMS + castTimeMS
+    castBar.duration = duration
+    castBar.text:SetText(spellName or "")
+    if icon then
+        castBar.icon:SetTexture(icon)
+    end
+    castBar:SetStatusBarColor(1, 0.7, 0)
+    castBar:SetMinMaxValues(0, duration)
+    castBar:SetValue(0)
+    castBar:SetScript("OnUpdate", CastBar_OnUpdate)
+    castBar:Show()
+end
+
 function MP:StopCast(frame)
     if frame and frame.castBar then
+        frame.castBar.isCombatLogCast = false
         frame.castBar:Hide()
         frame.castBar:SetScript("OnUpdate", nil)
     end
@@ -2067,8 +2126,10 @@ function MP:UpdateDebuffs(frame)
             end
         end
     end
+    frame.activeDebuffs = activeDebuffs
     MP:UpdateDoTLethal(frame)
     MP:UpdateHealthColor(frame)
+    MP:UpdateRaidIcon(frame)
 end
 
 -- Setup/Re-apply all visual configurations to existing custom plates
@@ -2203,6 +2264,7 @@ end
 
 -- Update all aspects of a custom frame
 function MP:UpdateAll(frame)
+    MP:UpdateThreat(frame)
     MP:UpdateHealth(frame)
     MP:UpdateName(frame)
     MP:UpdateLevel(frame)
@@ -2304,17 +2366,10 @@ local function CreateCustomPlate(namePlate)
     dragon:Hide()
     frame.dragonIcon = dragon
     
-    -- Raid Target Icon (dedicated frame child of plate frame with high frame level to avoid StatusBar clipping)
-    local raidIconFrame = CreateFrame("Frame", nil, frame)
-    raidIconFrame:SetSize(22, 22)
-    raidIconFrame:SetPoint("LEFT", frame, "RIGHT", 8, 0)
-    raidIconFrame:SetFrameStrata(frame:GetFrameStrata())
-    raidIconFrame:SetFrameLevel(frame:GetFrameLevel() + 30)
-    raidIconFrame:Hide()
-    frame.raidIconFrame = raidIconFrame
-    
-    local raidIcon = raidIconFrame:CreateTexture(nil, "OVERLAY", nil, 7)
-    raidIcon:SetAllPoints(raidIconFrame)
+    -- Raid Target Icon (Direct texture on frame, highest overlay layer, centered above name)
+    local raidIcon = frame:CreateTexture(nil, "OVERLAY", nil, 7)
+    raidIcon:SetSize(22, 22)
+    raidIcon:SetPoint("BOTTOM", frame, "TOP", 0, 16)
     raidIcon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
     raidIcon:Hide()
     frame.raidIcon = raidIcon
@@ -2754,12 +2809,10 @@ f:SetScript("OnEvent", function(self, event, ...)
                     end
                 end
             end
-            if frame.raidIconFrame then
-                frame.raidIconFrame:Hide()
-            end
             if frame.raidIcon then
                 frame.raidIcon:Hide()
                 frame.raidIcon.currentIndex = nil
+                frame.raidIcon.currentYOffset = nil
             end
             frame.unit = nil
             MP.activePlates[unit] = nil
@@ -2768,10 +2821,10 @@ f:SetScript("OnEvent", function(self, event, ...)
         for _, frame in pairs(MP.activePlates) do
             MP:UpdateTargetHighlight(frame)
             MP:UpdateRaidIcon(frame)
-            MP:UpdateHealth(frame)
             MP:UpdateThreat(frame)
+            MP:UpdateHealth(frame)
             MP:UpdateDebuffs(frame)
-            if frame.unit and SafeCall(UnitIsUnit, frame.unit, "target") then
+            if frame.unit then
                 MP:StartCast(frame, frame.unit)
             else
                 MP:StopCast(frame)
@@ -2886,10 +2939,10 @@ f:SetScript("OnEvent", function(self, event, ...)
             local frame = MP.activePlates[unit]
             if frame then
                 MP:StartCast(frame, unit)
-            elseif unit == "target" then
+            elseif unit ~= "player" and unit ~= "pet" then
                 for npUnit, npFrame in pairs(MP.activePlates) do
-                    if SafeCall(UnitIsUnit, npUnit, "target") then
-                        MP:StartCast(npFrame, "target")
+                    if SafeCall(UnitIsUnit, npUnit, unit) then
+                        MP:StartCast(npFrame, unit)
                     end
                 end
             end
@@ -2900,9 +2953,9 @@ f:SetScript("OnEvent", function(self, event, ...)
             local frame = MP.activePlates[unit]
             if frame then
                 MP:StopCast(frame)
-            elseif unit == "target" then
+            elseif unit ~= "player" and unit ~= "pet" then
                 for npUnit, npFrame in pairs(MP.activePlates) do
-                    if SafeCall(UnitIsUnit, npUnit, "target") then
+                    if SafeCall(UnitIsUnit, npUnit, unit) then
                         MP:StopCast(npFrame)
                     end
                 end
@@ -2924,6 +2977,57 @@ f:SetScript("OnEvent", function(self, event, ...)
         else
             timestamp, eventType, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID = ...
         end
+        if MP.db.showCastBar then
+            if eventType == "SPELL_CAST_START" and sourceGUID and sourceGUID ~= (MP.playerGUID or UnitGUID("player")) then
+                local spellId, spellName
+                if CombatLogGetCurrentEventInfo then
+                    spellId, spellName = select(12, CombatLogGetCurrentEventInfo())
+                else
+                    spellId, spellName = select(12, ...)
+                end
+                local castTime, icon
+                if spellId then
+                    if C_Spell and C_Spell.GetSpellInfo then
+                        local info = SafeCall(C_Spell.GetSpellInfo, spellId)
+                        if info then
+                            castTime = info.castTime
+                            icon = info.iconID
+                            if not spellName then spellName = info.name end
+                        end
+                    elseif GetSpellInfo then
+                        local n, _, ic, cTime = SafeCall(GetSpellInfo, spellId)
+                        castTime = cTime
+                        icon = ic
+                        if not spellName then spellName = n end
+                    end
+                end
+                if castTime and castTime > 0 then
+                    for unit, plateFrame in pairs(MP.activePlates) do
+                        if SafeCall(UnitGUID, unit) == sourceGUID then
+                            MP:StartCombatLogCast(plateFrame, spellName, icon, castTime)
+                            break
+                        end
+                    end
+                end
+            elseif (eventType == "SPELL_CAST_SUCCESS" or eventType == "SPELL_CAST_FAILED") and sourceGUID then
+                for unit, plateFrame in pairs(MP.activePlates) do
+                    if SafeCall(UnitGUID, unit) == sourceGUID then
+                        if plateFrame.castBar and plateFrame.castBar.isCombatLogCast then
+                            MP:StopCast(plateFrame)
+                        end
+                        break
+                    end
+                end
+            elseif (eventType == "SPELL_INTERRUPT" or eventType == "UNIT_DIED") and destGUID then
+                for unit, plateFrame in pairs(MP.activePlates) do
+                    if SafeCall(UnitGUID, unit) == destGUID then
+                        MP:StopCast(plateFrame)
+                        break
+                    end
+                end
+            end
+        end
+
         if (eventType == "SPELL_DAMAGE" or eventType == "SPELL_PERIODIC_DAMAGE") and sourceGUID == (MP.playerGUID or UnitGUID("player")) then
             local spellId, spellName
             if CombatLogGetCurrentEventInfo then
@@ -3023,10 +3127,13 @@ f:SetScript("OnUpdate", function(self, elapsed)
             end
         end
         
-        -- Periodically refresh raid target markers so external or macro marks show immediately
+        -- Periodically refresh raid target markers and catch missed non-target casts
         for _, frame in pairs(MP.activePlates) do
             if frame and frame.unit and frame:IsShown() then
                 MP:UpdateRaidIcon(frame)
+                if MP.db.showCastBar and frame.castBar and not frame.castBar:IsShown() then
+                    MP:StartCast(frame, frame.unit)
+                end
             end
         end
         
@@ -3083,10 +3190,11 @@ SlashCmdList["MYPLATESDEBUG"] = function(msg)
             print("  |cffff0000Target auraContainer:|r None (using fallback frame)")
         end
         local rIdx = GetRaidTargetIndex and (GetRaidTargetIndex(targetFrame.unit or "target") or GetRaidTargetIndex("target"))
-        print(string.format("  Raid Marker: index=%s | shown=%s | frameLevel=%s",
+        print(string.format("  Raid Marker: index=%s | shown=%s | texture=%s | yOffset=%s",
             tostring(rIdx),
             tostring(targetFrame.raidIcon and targetFrame.raidIcon:IsShown()),
-            tostring(targetFrame.raidIconFrame and targetFrame.raidIconFrame:GetFrameLevel())))
+            tostring(targetFrame.raidIcon and targetFrame.raidIcon:GetTexture()),
+            tostring(targetFrame.raidIcon and targetFrame.raidIcon.currentYOffset)))
         print("|cff00ff00aurasFrame shown:|r", targetFrame.aurasFrame and targetFrame.aurasFrame:IsShown() and "|cff00ff00YES|r" or "|cffff0000NO|r")
         for i = 1, 5 do
             local icon = targetFrame.auraIcons and targetFrame.auraIcons[i]
@@ -3099,6 +3207,25 @@ end
 
 SLASH_MYPLATESTEST1 = "/mptest"
 SlashCmdList["MYPLATESTEST"] = function(msg)
+    if msg and (string.find(strlower(msg), "raid") or string.find(strlower(msg), "marker") or string.find(strlower(msg), "skull")) then
+        if not UnitExists("target") then
+            print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest raid.")
+            return
+        end
+        local targetPlate = MP:GetTargetPlateFrame()
+        if targetPlate and targetPlate.raidIcon then
+            targetPlate.raidIcon:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
+            targetPlate.raidIcon:SetTexCoord(0.75, 1.0, 0.25, 0.50) -- Skull (8)
+            local yOffset = (MP.db.fontSizeName or 11) + 4
+            targetPlate.raidIcon:ClearAllPoints()
+            targetPlate.raidIcon:SetPoint("BOTTOM", targetPlate, "TOP", 0, yOffset)
+            targetPlate.raidIcon:Show()
+            print("|cff00ff00[MyPlates Test]|r Displayed Skull marker (8) centered above target nameplate!")
+        else
+            print("|cffff0000[MyPlates Test]|r Target plate not found on screen. Toggle enemy plates ON (V).")
+        end
+        return
+    end
     if not UnitExists("target") then
         print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest.")
         return
