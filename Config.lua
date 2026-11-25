@@ -122,25 +122,64 @@ local function CreateSlider(parent, label, settingKey, minVal, maxVal, step, x, 
     return slider
 end
 
-local function CreateColorSwatch(parent, label, settingKey, defaultColor, x, y)
+local function OpenColorPickerForSetting(settingKey, defaultColor, updateFn)
+    local c = (MP.db and MP.db[settingKey]) or (MP.defaults and MP.defaults[settingKey]) or defaultColor
+    local prevR, prevG, prevB = c.r, c.g, c.b
+
+    if ColorPickerFrame.SetupColorPickerAndShow then
+        local info = {
+            r = prevR,
+            g = prevG,
+            b = prevB,
+            hasOpacity = false,
+            swatchFunc = function()
+                local r, g, b = ColorPickerFrame:GetColorRGB()
+                updateFn(r, g, b)
+            end,
+            cancelFunc = function(prev)
+                local r = (prev and prev.r) or prevR
+                local g = (prev and prev.g) or prevG
+                local b = (prev and prev.b) or prevB
+                updateFn(r, g, b)
+            end,
+        }
+        ColorPickerFrame:SetupColorPickerAndShow(info)
+    else
+        ColorPickerFrame.func = function()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            updateFn(r, g, b)
+        end
+        ColorPickerFrame.cancelFunc = function()
+            updateFn(prevR, prevG, prevB)
+        end
+        ColorPickerFrame.hasOpacity = false
+        if ColorPickerFrame.SetColorRGB then
+            ColorPickerFrame:SetColorRGB(prevR, prevG, prevB)
+        end
+        ColorPickerFrame:Show()
+    end
+end
+
+local function CreateColorSwatch(parent, label, settingKey, defaultColor, x, y, boxSize, fontTemplate)
+    local size = boxSize or 22
     local btn = CreateFrame("Button", nil, parent)
-    btn:SetSize(22, 22)
+    btn:SetSize(size, size)
     btn:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
     
     local border = btn:CreateTexture(nil, "BACKGROUND")
-    border:SetSize(24, 24)
+    border:SetSize(size + 2, size + 2)
     border:SetPoint("CENTER")
     border:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
     border:SetVertexColor(0.2, 0.2, 0.2, 1)
     
     local swatch = btn:CreateTexture(nil, "OVERLAY")
-    swatch:SetSize(20, 20)
+    swatch:SetSize(size - 2, size - 2)
     swatch:SetPoint("CENTER")
     swatch:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
     btn.swatch = swatch
     
-    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    text:SetPoint("LEFT", btn, "RIGHT", 8, 0)
+    local text = btn:CreateFontString(nil, "OVERLAY", fontTemplate or "GameFontNormal")
+    text:SetPoint("LEFT", btn, "RIGHT", boxSize and 5 or 8, 0)
     text:SetText(label)
     
     local function UpdateColor(r, g, b)
@@ -155,73 +194,66 @@ local function CreateColorSwatch(parent, label, settingKey, defaultColor, x, y)
     end)
     
     btn:SetScript("OnClick", function()
-        local c = (MP.db and MP.db[settingKey]) or (MP.defaults and MP.defaults[settingKey]) or defaultColor
-        local prevR, prevG, prevB = c.r, c.g, c.b
-        
-        if ColorPickerFrame.SetupColorPickerAndShow then
-            local info = {
-                r = prevR,
-                g = prevG,
-                b = prevB,
-                hasOpacity = false,
-                swatchFunc = function()
-                    local r, g, b = ColorPickerFrame:GetColorRGB()
-                    UpdateColor(r, g, b)
-                end,
-                cancelFunc = function(prev)
-                    local r = (prev and prev.r) or prevR
-                    local g = (prev and prev.g) or prevG
-                    local b = (prev and prev.b) or prevB
-                    UpdateColor(r, g, b)
-                end,
-            }
-            ColorPickerFrame:SetupColorPickerAndShow(info)
-        else
-            ColorPickerFrame.func = function()
-                local r, g, b = ColorPickerFrame:GetColorRGB()
-                UpdateColor(r, g, b)
-            end
-            ColorPickerFrame.cancelFunc = function()
-                UpdateColor(prevR, prevG, prevB)
-            end
-            ColorPickerFrame.hasOpacity = false
-            if ColorPickerFrame.SetColorRGB then
-                ColorPickerFrame:SetColorRGB(prevR, prevG, prevB)
-            end
-            ColorPickerFrame:Show()
-        end
+        OpenColorPickerForSetting(settingKey, defaultColor, UpdateColor)
     end)
     
     return btn, UpdateColor
 end
 
--- =========================================================================
--- Column 1: Sizing & Dimensions (X = 20)
--- =========================================================================
-local section1 = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-section1:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -58)
-section1:SetText("Sizing & Font Sizes")
+local function CreateMiniColorSwatch(parent, label, settingKey, defaultColor, x, y)
+    return CreateColorSwatch(parent, label, settingKey, defaultColor, x, y, 16, "GameFontNormalSmall")
+end
 
-CreateSlider(panel, "Health Bar Width", "width", 80, 220, 5, 20, -88)
-CreateSlider(panel, "Health Bar Height", "height", 6, 32, 1, 20, -132)
-CreateSlider(panel, "Cast Bar Height", "castHeight", 6, 24, 1, 20, -176)
-CreateSlider(panel, "Name Font Size", "fontSizeName", 8, 20, 1, 20, -220)
-CreateSlider(panel, "Health Font Size", "fontSizeHealth", 8, 22, 1, 20, -264)
-CreateSlider(panel, "Level & Threat Font Size", "fontSizeLevel", 8, 22, 1, 20, -308)
-CreateSlider(panel, "Debuff Font Size", "fontSizeDebuff", 7, 20, 1, 20, -352)
-CreateSlider(panel, "Debuff Icon Size", "debuffSize", 14, 48, 1, 20, -396)
-CreateSlider(panel, "Max Distance (Yards)", "maxDistance", 20, 41, 1, 20, -440)
+-- Scrollable container for options columns
+local okScroll, scroll = pcall(CreateFrame, "ScrollFrame", "MyPlatesOptionsScrollFrame", panel, "UIPanelScrollFrameTemplate")
+if not okScroll or not scroll then
+    scroll = CreateFrame("ScrollFrame", "MyPlatesOptionsScrollFrame", panel)
+end
+scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -56)
+scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 12)
+scroll:EnableMouseWheel(true)
+scroll:SetScript("OnMouseWheel", function(self, delta)
+    local cur = self:GetVerticalScroll() or 0
+    local maxScroll = self:GetVerticalScrollRange() or 0
+    local nextScroll = math.max(0, math.min(maxScroll, cur - (delta * 28)))
+    self:SetVerticalScroll(nextScroll)
+end)
+
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(630, 580)
+scroll:SetScrollChild(content)
+
+-- =========================================================================
+-- Column 1: Sizing, Scale & Brightness (X = 20)
+-- =========================================================================
+local section1 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+section1:SetPoint("TOPLEFT", content, "TOPLEFT", 20, -8)
+section1:SetText("Sizing, Scale & Brightness")
+
+CreateSlider(content, "Health Bar Width", "width", 80, 220, 5, 20, -36)
+CreateSlider(content, "Health Bar Height", "height", 6, 32, 1, 20, -74)
+CreateSlider(content, "Cast Bar Height", "castHeight", 6, 24, 1, 20, -112)
+CreateSlider(content, "Name Font Size", "fontSizeName", 8, 20, 1, 20, -150)
+CreateSlider(content, "Health Font Size", "fontSizeHealth", 8, 22, 1, 20, -188)
+CreateSlider(content, "Level & Threat Font Size", "fontSizeLevel", 8, 22, 1, 20, -226)
+CreateSlider(content, "Debuff Font Size", "fontSizeDebuff", 7, 20, 1, 20, -264)
+CreateSlider(content, "Debuff Icon Size", "debuffSize", 14, 48, 1, 20, -302)
+CreateSlider(content, "Max Distance (Yards)", "maxDistance", 20, 41, 1, 20, -340)
+CreateSlider(content, "Non-Target Brightness (%)", "nonTargetAlpha", 40, 100, 5, 20, -378)
+CreateSlider(content, "Target Plate Scale (%)", "targetScale", 100, 135, 5, 20, -416)
+CreateSlider(content, "Threat Snapshot Fade (s)", "threatSnapshotDuration", 3, 10, 1, 20, -454)
 
 -- =========================================================================
 -- Column 2: Style, Textures & Highlights (X = 230)
 -- =========================================================================
-local section2 = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-section2:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -58)
+local section2 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+section2:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -8)
 section2:SetText("Style & Textures")
 
-CreateCheckbox(panel, "Show Cast Bars", "showCastBar", nil, 230, -82)
-CreateCheckbox(panel, "Show Level & Classification", "showLevel", nil, 230, -106)
-CreateCheckbox(panel, "Show Elite / Rare Dragon", "showEliteDragon", nil, 230, -130)
+CreateCheckbox(content, "Show Cast Bars", "showCastBar", nil, 230, -32)
+CreateCheckbox(content, "Show Level & Classification", "showLevel", nil, 230, -56)
+CreateCheckbox(content, "Show Elite / Rare Dragon", "showEliteDragon", nil, 230, -80)
+CreateCheckbox(content, "Blizzard Default Style", "blizzStyle", nil, 230, -104)
 
 -- Bar Texture Cycling
 local textures = {
@@ -241,16 +273,16 @@ local function GetTextureName(path)
     return "Flat"
 end
 
-local texLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-texLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -160)
+local texLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+texLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -134)
 texLabel:SetText("Bar Texture:")
 
-local texValue = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+local texValue = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 texValue:SetPoint("LEFT", texLabel, "RIGHT", 6, 0)
 
-local cycleTexBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+local cycleTexBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
 cycleTexBtn:SetSize(110, 22)
-cycleTexBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -182)
+cycleTexBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -156)
 cycleTexBtn:SetText("Cycle Texture")
 
 cycleTexBtn:SetScript("OnClick", function()
@@ -289,16 +321,16 @@ local function GetFontName(path)
     return "Friz Quadrata"
 end
 
-local fontLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-fontLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -214)
+local fontLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+fontLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -188)
 fontLabel:SetText("Active Font:")
 
-local fontValue = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+local fontValue = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 fontValue:SetPoint("LEFT", fontLabel, "RIGHT", 6, 0)
 
-local cycleBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+local cycleBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
 cycleBtn:SetSize(110, 22)
-cycleBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -236)
+cycleBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -210)
 cycleBtn:SetText("Cycle Font")
 
 cycleBtn:SetScript("OnClick", function()
@@ -321,16 +353,16 @@ RegisterRefresh(function()
 end)
 
 -- Target Highlight Controls
-local sectionTarget = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-sectionTarget:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -270)
+local sectionTarget = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+sectionTarget:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -244)
 sectionTarget:SetText("Target Highlights")
 
-CreateCheckbox(panel, "Target Glow Border", "targetGlow", nil, 230, -292)
-CreateSlider(panel, "Glow Thickness", "glowThickness", 1, 8, 1, 230, -336)
-CreateCheckbox(panel, "Target Brackets (» «)", "targetBrackets", nil, 230, -366)
+CreateCheckbox(content, "Target Glow Border", "targetGlow", nil, 230, -266)
+CreateSlider(content, "Glow Thickness", "glowThickness", 1, 8, 1, 230, -308)
+CreateCheckbox(content, "Target Brackets (» «)", "targetBrackets", nil, 230, -338)
 
 -- Target Glow Color Swatch & Presets
-local swatchBtn, updateGlowColor = CreateColorSwatch(panel, "Custom Glow Color", "targetGlowColor", { r = 1, g = 1, b = 0 }, 230, -396)
+local swatchBtn, updateGlowColor = CreateColorSwatch(content, "Custom Glow Color", "targetGlowColor", { r = 1, g = 1, b = 0 }, 230, -368)
 
 local presetColors = {
     { r = 1, g = 1, b = 0 },         -- Yellow
@@ -342,12 +374,12 @@ local presetColors = {
     { r = 1, g = 0.5, b = 0 },       -- Orange
 }
 
-local presetLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-presetLabel:SetPoint("TOPLEFT", panel, "TOPLEFT", 230, -426)
+local presetLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+presetLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -398)
 presetLabel:SetText("Presets:")
 
 for i, col in ipairs(presetColors) do
-    local pb = CreateFrame("Button", nil, panel)
+    local pb = CreateFrame("Button", nil, content)
     pb:SetSize(18, 18)
     pb:SetPoint("LEFT", presetLabel, "RIGHT", 6 + (i - 1) * 22, 0)
     
@@ -368,37 +400,57 @@ for i, col in ipairs(presetColors) do
     end)
 end
 
+-- Target-of-Target & Alerts Section
+local sectionAlerts = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+sectionAlerts:SetPoint("TOPLEFT", content, "TOPLEFT", 230, -430)
+sectionAlerts:SetText("Target-of-Target & Alerts")
+
+CreateCheckbox(content, "Show Target of Target", "showTargetOfTarget", nil, 230, -452)
+CreateCheckbox(content, "Hide ToT When Targeting You", "totHideSelf", nil, 230, -476)
+CreateCheckbox(content, "Flash Border on Aggro Alert", "aggroLossFlash", nil, 230, -500)
+CreateCheckbox(content, "Show Combo Points", "showComboPoints", nil, 230, -524)
+
 -- =========================================================================
 -- Column 3: Colors & Threat (X = 450)
 -- =========================================================================
-local section3 = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-section3:SetPoint("TOPLEFT", panel, "TOPLEFT", 450, -58)
+local section3 = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+section3:SetPoint("TOPLEFT", content, "TOPLEFT", 450, -8)
 section3:SetText("Colors & Threat")
 
-CreateCheckbox(panel, "Class Colors (Enemy)", "useClassColorsEnemy", nil, 450, -82)
-CreateCheckbox(panel, "Class Colors (Friendly)", "useClassColorsFriendly", nil, 450, -106)
-CreateCheckbox(panel, "Reaction Colors (NPCs)", "useReactionColors", nil, 450, -130)
+CreateCheckbox(content, "Class Colors (Enemy)", "useClassColorsEnemy", nil, 450, -32)
+CreateCheckbox(content, "Class Colors (Friendly)", "useClassColorsFriendly", nil, 450, -56)
+CreateCheckbox(content, "Reaction Colors (NPCs)", "useReactionColors", nil, 450, -80)
 
-local sectionThreat = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-sectionThreat:SetPoint("TOPLEFT", panel, "TOPLEFT", 450, -164)
+local sectionThreat = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+sectionThreat:SetPoint("TOPLEFT", content, "TOPLEFT", 450, -114)
 sectionThreat:SetText("Threat & Debuffs")
 
-CreateCheckbox(panel, "Enable Threat Coloring", "enableThreat", nil, 450, -188)
-CreateCheckbox(panel, "Tank Mode (Threat Lead)", "tankMode", nil, 450, -212)
-CreateCheckbox(panel, "Show Target Debuffs", "showDebuffs", nil, 450, -236)
-CreateCheckbox(panel, "Show Only My Debuffs", "onlyPlayerDebuffs", nil, 450, -260)
-CreateCheckbox(panel, "Stacking Nameplates", "stackingPlates", nil, 450, -284)
+CreateCheckbox(content, "Enable Threat Coloring", "enableThreat", nil, 450, -138)
+CreateCheckbox(content, "Tank Mode (Threat Lead)", "tankMode", nil, 450, -162)
+CreateCheckbox(content, "Threat Snapshots (*)", "threatSnapshots", nil, 450, -186)
 
-local sectionDot = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-sectionDot:SetPoint("TOPLEFT", panel, "TOPLEFT", 450, -316)
+local threatColLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+threatColLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 450, -212)
+threatColLabel:SetText("Threat Colors:")
+
+CreateMiniColorSwatch(content, "Safe", "threatColorSecure", { r = 0.2, g = 0.8, b = 0.2 }, 450, -230)
+CreateMiniColorSwatch(content, "Warn", "threatColorWarning", { r = 0.9, g = 0.6, b = 0.0 }, 508, -230)
+CreateMiniColorSwatch(content, "Danger", "threatColorDanger", { r = 0.9, g = 0.2, b = 0.2 }, 568, -230)
+
+CreateCheckbox(content, "Show Target Debuffs", "showDebuffs", nil, 450, -258)
+CreateCheckbox(content, "Show Only My Debuffs", "onlyPlayerDebuffs", nil, 450, -282)
+CreateCheckbox(content, "Stacking Nameplates", "stackingPlates", nil, 450, -306)
+
+local sectionDot = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+sectionDot:SetPoint("TOPLEFT", content, "TOPLEFT", 450, -338)
 sectionDot:SetText("DoT Death Prediction")
 
-CreateCheckbox(panel, "Enable DoT Kill Prediction", "enableDotKill", nil, 450, -338)
-CreateCheckbox(panel, "Include Group Member DoTs", "includeGroupDots", nil, 450, -360)
-CreateCheckbox(panel, "Show Skull Marker", "dotLethalSkull", nil, 450, -382)
-CreateCheckbox(panel, "Change Health Bar Color", "dotLethalBar", nil, 450, -404)
-CreateCheckbox(panel, "DoT Prediction Overlay Bar", "dotLethalPrediction", nil, 450, -426)
-CreateCheckbox(panel, "Color Health Text", "dotLethalHpText", nil, 450, -448)
+CreateCheckbox(content, "Enable DoT Kill Prediction", "enableDotKill", nil, 450, -360)
+CreateCheckbox(content, "Include Group Member DoTs", "includeGroupDots", nil, 450, -382)
+CreateCheckbox(content, "Show Skull Marker", "dotLethalSkull", nil, 450, -404)
+CreateCheckbox(content, "Change Health Bar Color", "dotLethalBar", nil, 450, -426)
+CreateCheckbox(content, "DoT Prediction Overlay Bar", "dotLethalPrediction", nil, 450, -448)
+CreateCheckbox(content, "Color Health Text", "dotLethalHpText", nil, 450, -470)
 
 -- =========================================================================
 -- Reset to Defaults Logic
@@ -423,9 +475,9 @@ end
 panel.default = ResetToDefaults
 
 local btn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-btn:SetSize(140, 24)
+btn:SetSize(130, 24)
 btn:SetText("Reset Defaults")
-btn:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 20, 20)
+btn:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -20, -18)
 btn:SetScript("OnClick", ResetToDefaults)
 
 -- Slash Commands registration to open the options panel

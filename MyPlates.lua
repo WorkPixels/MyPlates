@@ -43,6 +43,7 @@ local IS_MIDNIGHT_ENGINE = (_G.issecretvalue ~= nil)
     or false
 
 MP.activePlates = {} -- Store active plates: [unit] = frame
+MP.threatSnapshots = {} -- Cached threat lead snapshots keyed by non-secret GUID
 
 -- Midnight / Forever C-Engine Native Aura Container Support
 if C_AddOns and C_AddOns.LoadAddOn then
@@ -78,6 +79,7 @@ MP.defaults = {
     showCastBar = true,
     showLevel = true,
     showEliteDragon = true,
+    blizzStyle = false,
     barTexture = "Interface\\ChatFrame\\ChatFrameBackground",
     fontPath = "Fonts\\FRIZQT__.TTF",
     
@@ -104,6 +106,19 @@ MP.defaults = {
     dotLethalBar = true,
     dotLethalPrediction = true,
     dotLethalHpText = true,
+
+    -- BlizzThreatPlates-Forever inspired features
+    threatSnapshots = true,
+    threatSnapshotDuration = 6,
+    showTargetOfTarget = true,
+    totHideSelf = true,
+    aggroLossFlash = true,
+    showComboPoints = true,
+    nonTargetAlpha = 100,
+    targetScale = 100,
+    threatColorSecure = { r = 0.2, g = 0.8, b = 0.2, a = 1 },
+    threatColorWarning = { r = 0.9, g = 0.6, b = 0.0, a = 1 },
+    threatColorDanger = { r = 0.9, g = 0.2, b = 0.2, a = 1 },
 }
 
 -- Baseline assignment so MP.db is never nil
@@ -118,6 +133,9 @@ MP.textures = {
 }
 
 function MP:GetBarTexture()
+    if MP.db and MP.db.blizzStyle then
+        return "Interface\\TargetingFrame\\UI-StatusBar"
+    end
     return (MP.db and MP.db.barTexture) or "Interface\\ChatFrame\\ChatFrameBackground"
 end
 
@@ -129,8 +147,50 @@ function MP:GetTargetGlowColor()
     return 1, 1, 0, 1
 end
 
+function MP:GetConfiguredThreatRGB(key, dr, dg, db)
+    local c = (MP.db and MP.db[key]) or (MP.defaults and MP.defaults[key])
+    if c and c.r and c.g and c.b then
+        return c.r, c.g, c.b
+    end
+    return dr, dg, db
+end
+
 -- DoT Tracking Cache & Tick Rates
 MP.dotTickCache = {}
+MP.trackedDots = {} -- Secret-safe player DoT casts keyed by non-secret GUID (mirrored on frame.trackedDots)
+MP.defaultDotDurations = {
+    ["Flame Shock"] = 12,
+    ["Rend"] = 15,
+    ["Deep Wounds"] = 12,
+    ["Corruption"] = 18,
+    ["Curse of Agony"] = 24,
+    ["Immolate"] = 15,
+    ["Siphon Life"] = 30,
+    ["Unstable Affliction"] = 18,
+    ["Seed of Corruption"] = 18,
+    ["Drain Life"] = 5,
+    ["Drain Soul"] = 15,
+    ["Shadow Word: Pain"] = 18,
+    ["Vampiric Touch"] = 15,
+    ["Devouring Plague"] = 24,
+    ["Holy Fire"] = 10,
+    ["Mind Flay"] = 3,
+    ["Moonfire"] = 12,
+    ["Insect Swarm"] = 12,
+    ["Rip"] = 12,
+    ["Rake"] = 9,
+    ["Lacerate"] = 15,
+    ["Serpent Sting"] = 15,
+    ["Immolation Trap"] = 15,
+    ["Black Arrow"] = 15,
+    ["Rupture"] = 16,
+    ["Garrote"] = 18,
+    ["Deadly Poison"] = 12,
+    ["Ignite"] = 4,
+    ["Pyroblast"] = 12,
+    ["Fireball"] = 8,
+    ["Consecration"] = 8,
+}
 MP.dotTickRates = {
     ["Flame Shock"] = 3.0,
     ["Rend"] = 3.0,
@@ -294,15 +354,23 @@ function MP:UpdatePlateWidth(frame)
     if frame:GetWidth() ~= targetWidth then
         frame:SetWidth(targetWidth)
     end
+    if frame.dotPredictionBar then
+        frame.dotPredictionBar:SetWidth(math.max(1, targetWidth - 2))
+    end
     MP:UpdateThreatAnchor(frame)
+    MP:UpdateComboPoints(frame)
 end
 
--- Threat % anchored directly in the middle of the health bar
+-- Threat % anchored on the left right after level text so it never truncates
 function MP:UpdateThreatAnchor(frame)
     if not frame or not frame.threatText or not frame.healthBar then return end
     frame.threatText:ClearAllPoints()
-    frame.threatText:SetPoint("CENTER", frame.healthBar, "CENTER", 0, 0)
-    frame.threatText:SetJustifyH("CENTER")
+    if MP.db.showLevel and frame.levelText then
+        frame.threatText:SetPoint("LEFT", frame.levelText, "RIGHT", 4, 0)
+    else
+        frame.threatText:SetPoint("LEFT", frame.healthBar, "LEFT", 3, 0)
+    end
+    frame.threatText:SetJustifyH("LEFT")
 end
 
 -- Helper: Normalize threat percentage (scaledPct is 0-100; rawPct 255 is byte representation of 100%)
@@ -316,6 +384,31 @@ local function NormalizePct(scaledPct, rawPct)
         return rawPct
     end
     return 0
+end
+
+-- Helper: Read player's combo points across Classic/TBC/Forever 12.x (Rogues & Cat Form Druids)
+local COMBO_POWER_TYPE = (Enum and Enum.PowerType and Enum.PowerType.ComboPoints) or 4
+local function GetPlayerComboPoints()
+    local cp, maxCp = 0, 5
+    if UnitPower then
+        local okP, val = pcall(UnitPower, "player", COMBO_POWER_TYPE)
+        if okP and type(val) == "number" and not IsSecret(val) then
+            cp = val
+        end
+        local okM, mVal = pcall(UnitPowerMax, "player", COMBO_POWER_TYPE)
+        if okM and type(mVal) == "number" and not IsSecret(mVal) and mVal > 0 then
+            maxCp = mVal
+        end
+    end
+    if cp == 0 and GetComboPoints then
+        local okG, gVal = pcall(GetComboPoints, "player", "target")
+        if okG and type(gVal) == "number" and not IsSecret(gVal) and gVal > 0 then
+            cp = gVal
+        end
+    end
+    if maxCp < 5 then maxCp = 5 end
+    if maxCp > 7 then maxCp = 7 end
+    return cp, maxCp
 end
 
 -- Helper: Resolve the highest-priority unit token matching a nameplate (target/focus/mouseover/group target)
@@ -927,39 +1020,39 @@ end
 -- Resolve threat colors based on status, percentage, and tank/DPS role
 function MP:GetThreatColor(status, pct, tankMode, isLead)
     local hasPct = pct and not IsSecret(pct)
+    local sr, sg, sb = MP:GetConfiguredThreatRGB("threatColorSecure", 0.2, 0.8, 0.2)
+    local wr, wg, wb = MP:GetConfiguredThreatRGB("threatColorWarning", 0.9, 0.6, 0.0)
+    local dr, dg, db = MP:GetConfiguredThreatRGB("threatColorDanger", 0.9, 0.2, 0.2)
+
     if tankMode then
-        -- Tank Mode: Green is secure aggro, Red is no aggro
+        -- Tank Mode: Secure color is good aggro, Danger color is no aggro
         if isLead then
             if status == 2 or (hasPct and pct <= 0) then
-                return 0.9, 0.6, 0   -- Orange (deficit or about to lose aggro)
+                return wr, wg, wb -- Warning (deficit or about to lose aggro)
             elseif hasPct and pct <= 15 then
-                return 0.9, 0.8, 0.2 -- Yellow (warning: 2nd place within 15% of your threat)
+                return wr, wg, wb -- Warning (2nd place within 15% of your threat)
             elseif status == 3 then
-                return 0.2, 0.8, 0.2 -- Green (healthy lead ahead)
+                return sr, sg, sb -- Secure (healthy lead ahead)
             else
-                return 0.9, 0.2, 0.2 -- Red (no aggro)
+                return dr, dg, db -- Danger (no aggro)
             end
         else
             if status == 3 then
-                return 0.2, 0.8, 0.2 -- Green (secure aggro)
-            elseif status == 2 then
-                return 0.9, 0.6, 0   -- Orange (losing aggro)
-            elseif status == 1 or (hasPct and pct >= 100) then
-                return 0.9, 0.8, 0.2 -- Yellow/Orange (gaining aggro back)
+                return sr, sg, sb -- Secure aggro
+            elseif status == 2 or status == 1 or (hasPct and pct >= 100) then
+                return wr, wg, wb -- Warning (losing aggro / gaining aggro back)
             else
-                return 0.9, 0.2, 0.2 -- Red (no aggro)
+                return dr, dg, db -- Danger (no aggro)
             end
         end
     else
-        -- DPS Mode: Green is safe, Red is danger
+        -- DPS Mode: Secure color is safe, Danger color is aggro
         if status == 3 or status == 2 then
-            return 0.9, 0.2, 0.2 -- Red (you have aggro)
-        elseif status == 1 or (hasPct and pct >= 100) then
-            return 0.9, 0.6, 0   -- Orange (warning - about to pull aggro)
-        elseif hasPct and pct >= 80 then
-            return 0.9, 0.8, 0.2 -- Yellow (approaching aggro)
+            return dr, dg, db -- Danger (you have aggro)
+        elseif status == 1 or (hasPct and pct >= 80) then
+            return wr, wg, wb -- Warning (approaching/about to pull aggro)
         else
-            return 0.2, 0.8, 0.2 -- Green (safe)
+            return sr, sg, sb -- Safe
         end
     end
 end
@@ -1041,23 +1134,141 @@ local function GetDebuffTooltipDamage(unit, index, spellId, auraInstanceID)
     return nil, nil
 end
 
--- Calculate total remaining DoT damage on unit from player
-function MP:GetUnitDoTDamage(unit)
+-- Secret-safe parser for the player's own spell tooltip (always readable on Forever 12.x)
+local function ParseSpellTooltipForDoT(spellID, spellName)
+    local texts = {}
+    if spellID and C_TooltipInfo and C_TooltipInfo.GetSpellByID then
+        local ok, data = pcall(C_TooltipInfo.GetSpellByID, spellID)
+        if ok and data and data.lines then
+            for _, line in ipairs(data.lines) do
+                if line.leftText and type(line.leftText) == "string" and not IsSecret(line.leftText) then
+                    table.insert(texts, line.leftText)
+                end
+            end
+        end
+    end
+    if #texts == 0 and spellID then
+        if C_Spell and C_Spell.GetSpellDescription then
+            local ok, desc = pcall(C_Spell.GetSpellDescription, spellID)
+            if ok and desc and type(desc) == "string" and not IsSecret(desc) and desc ~= "" then
+                table.insert(texts, desc)
+            end
+        elseif GetSpellDescription then
+            local ok, desc = pcall(GetSpellDescription, spellID)
+            if ok and desc and type(desc) == "string" and not IsSecret(desc) and desc ~= "" then
+                table.insert(texts, desc)
+            end
+        end
+    end
+
+    local tickDmg, totalDmg, dur, tickRate
+    for _, rawText in ipairs(texts) do
+        local text = strlower(rawText:gsub("(%d),(%d)", "%1%2"))
+        local d1, ev, du1 = text:match("(%d+)[^%.]*damage every (%d+)%s*sec[^%.]*for (%d+)%s*sec")
+        if d1 and ev and du1 then
+            tickDmg = tonumber(d1)
+            tickRate = tonumber(ev)
+            dur = tonumber(du1)
+            break
+        end
+        local d2, du2 = text:match("(%d+)[^%.]*damage over (%d+)%s*sec")
+        if not d2 then d2, du2 = text:match("for (%d+)[^%.]*over (%d+)%s*sec") end
+        if not d2 then d2, du2 = text:match("bleed[^%.]*(%d+)[^%.]*over (%d+)%s*sec") end
+        if d2 and du2 then
+            totalDmg = tonumber(d2)
+            dur = tonumber(du2)
+            break
+        end
+    end
+
+    tickRate = tickRate or (spellName and MP.dotTickRates[spellName]) or (spellID and MP.dotTickRates[spellID]) or 3.0
+    if not tickDmg and totalDmg and dur and dur >= 3 then
+        local totalTicks = math.max(1, math.floor(dur / tickRate + 0.5))
+        tickDmg = math.floor(totalDmg / totalTicks)
+    end
+    if tickDmg and tickDmg > 0 then
+        return tickDmg, dur, tickRate
+    end
+    return nil, nil, nil
+end
+
+-- Record player DoT cast on target for Forever/12.x secret-value tracking
+function MP:RecordPlayerDoTCast(spellID, spellName)
+    if not MP.db.enableDotKill or not spellName or IsSecret(spellName) then return end
+    if not UnitExists("target") or not SafeCall(UnitCanAttack, "player", "target") then return end
+
+    local lower = strlower(spellName)
+    if string.find(lower, "consecrat") then return end
+
+    local tipTickDmg, tipDur, tipRate = ParseSpellTooltipForDoT(spellID, spellName)
+    local isKnownDot = (MP.dotTickRates[spellName] ~= nil) or (spellID and MP.dotTickRates[spellID] ~= nil)
+    if not tipTickDmg and not isKnownDot then
+        return
+    end
+
+    local dur = tipDur or MP.defaultDotDurations[spellName] or 15
+    local tickRate = tipRate or MP.dotTickRates[spellName] or 3.0
+    local cachedTick = (spellID and MP.dotTickCache[spellID]) or MP.dotTickCache[spellName]
+    local tickAmount = (cachedTick and cachedTick > 0) and cachedTick
+        or tipTickDmg
+        or MP.defaultDotTicks[spellName]
+        or math.floor((UnitLevel("player") or 60) * 0.5)
+
+    local now = GetTime()
+    local entry = {
+        name = spellName,
+        spellId = spellID,
+        tickRate = tickRate,
+        tickAmount = tickAmount,
+        duration = dur,
+        appliedAt = now,
+        expiresAt = now + dur,
+    }
+
+    local targetPlate = MP:GetTargetPlateFrame()
+    if targetPlate then
+        targetPlate.trackedDots = targetPlate.trackedDots or {}
+        targetPlate.trackedDots[spellName] = entry
+    end
+
+    local rawGuid = SafeCall(UnitGUID, "target")
+    local safeGuid = (rawGuid and not IsSecret(rawGuid)) and rawGuid or nil
+    if safeGuid then
+        MP.trackedDots[safeGuid] = MP.trackedDots[safeGuid] or {}
+        MP.trackedDots[safeGuid][spellName] = entry
+    end
+
+    if targetPlate then
+        MP:UpdateDoTLethal(targetPlate)
+    end
+end
+
+-- Calculate total remaining DoT damage on unit
+function MP:GetUnitDoTDamage(unit, frame)
     if not unit then return 0 end
+
+    -- Priority 1: DoesItDie external API if installed and active
+    if _G.DoesItDie and _G.DoesItDie.GetRemainingDamage then
+        local okD, dDmg = pcall(_G.DoesItDie.GetRemainingDamage, unit)
+        if okD and type(dDmg) == "number" and not IsSecret(dDmg) and dDmg > 0 then
+            return dDmg
+        end
+    end
+
     local totalDmg = 0
     local now = GetTime()
     
+    -- Priority 2: Native non-secret unit auras (Classic Anniversary / Legacy)
     local auras = GetUnitAuraList(unit)
-    
     for i, a in ipairs(auras or {}) do
-        local isAllowed = a.isFromPlayerOrPlayerPet or (a.sourceUnit == "player") or (a.sourceUnit == "pet") or IsAuraFromPlayer(a, unit)
-        if not isAllowed and MP.db.includeGroupDots and a.sourceUnit and not IsSecret(a.sourceUnit) then
-            local s = a.sourceUnit
-            if type(s) == "string" and (s == "party1" or s == "party2" or s == "party3" or s == "party4" or s:match("^party") or s:match("^raid")) then
+        local safeSrc = (a.sourceUnit and not IsSecret(a.sourceUnit)) and a.sourceUnit or nil
+        local isAllowed = (a.isFromPlayerOrPlayerPet == true) or (safeSrc == "player") or (safeSrc == "pet") or IsAuraFromPlayer(a, unit)
+        if not isAllowed and MP.db.includeGroupDots and safeSrc then
+            if type(safeSrc) == "string" and (safeSrc == "party1" or safeSrc == "party2" or safeSrc == "party3" or safeSrc == "party4" or safeSrc:match("^party") or safeSrc:match("^raid")) then
                 isAllowed = true
-            elseif UnitInParty and SafeCall(UnitInParty, s) then
+            elseif UnitInParty and SafeCall(UnitInParty, safeSrc) then
                 isAllowed = true
-            elseif UnitInRaid and SafeCall(UnitInRaid, s) then
+            elseif UnitInRaid and SafeCall(UnitInRaid, safeSrc) then
                 isAllowed = true
             end
         end
@@ -1078,7 +1289,7 @@ function MP:GetUnitDoTDamage(unit)
                 local tipDmg, tipDur = GetDebuffTooltipDamage(unit, i, spellId, a.auraInstanceID)
                 if tipDmg and tipDmg > 0 then
                     local d = (tipDur and tipDur > 0) and tipDur or a.duration
-                    if d and d > 0 then
+                    if d and not IsSecret(d) and d > 0 then
                         local totalTicks = math.max(1, math.floor(d / tickRate + 0.5))
                         tickAmount = math.floor(tipDmg / totalTicks)
                         if tickAmount > 0 then
@@ -1101,101 +1312,123 @@ function MP:GetUnitDoTDamage(unit)
             end
         end
     end
+
+    if totalDmg > 0 then
+        return totalDmg
+    end
+
+    -- Priority 3: Built-in secret-safe trackedDots (WoW Forever / 12.x engine)
+    local rawGuid = SafeCall(UnitGUID, unit)
+    local safeGuid = (rawGuid and not IsSecret(rawGuid)) and rawGuid or nil
+    local dots = (frame and frame.trackedDots) or (safeGuid and MP.trackedDots[safeGuid])
+    if dots then
+        for k, dot in pairs(dots) do
+            if not dot.expiresAt or dot.expiresAt <= now then
+                dots[k] = nil
+            else
+                local timeLeft = dot.expiresAt - now
+                local remTicks = math.ceil(timeLeft / (dot.tickRate or 3.0))
+                if remTicks > 0 and dot.tickAmount and dot.tickAmount > 0 then
+                    totalDmg = totalDmg + (remTicks * dot.tickAmount)
+                end
+            end
+        end
+    end
     
     return totalDmg
 end
 
--- Update lethal DoT prediction and visuals
+-- Update lethal DoT prediction and visuals (secret-safe StatusBar + clipping-window Skull)
 function MP:UpdateDoTLethal(frame)
     if not frame or not frame.unit or not MP.db.enableDotKill then
-        frame.isDotLethal = false
-        if frame.lethalSkull then frame.lethalSkull:Hide() end
-        if frame.dotPredictionBar then frame.dotPredictionBar:Hide() end
-        if frame.hpText then frame.hpText:SetTextColor(1, 1, 1) end
+        if frame then
+            frame.isDotLethal = false
+            if frame.lethalSkullWindow then frame.lethalSkullWindow:Hide() end
+            if frame.dotPredictionWindow then frame.dotPredictionWindow:Hide() end
+            if frame.dotPredictionBar then frame.dotPredictionBar:Hide() end
+            if frame.lethalBarWindow then frame.lethalBarWindow:Hide() end
+            if frame.hpText then frame.hpText:SetTextColor(1, 1, 1) end
+        end
         return false
     end
     
     local unit = frame.unit
-    local hp = SafeCall(UnitHealth, unit)
-    local maxHp = SafeCall(UnitHealthMax, unit)
-    if (not hp or not maxHp or hp <= 0 or maxHp <= 0) and SafeCall(UnitIsUnit, unit, "target") then
-        hp = SafeCall(UnitHealth, "target")
-        maxHp = SafeCall(UnitHealthMax, "target")
+    local okHp, rawHp = pcall(UnitHealth, unit)
+    local okMax, rawMaxHp = pcall(UnitHealthMax, unit)
+    if (not okHp or rawHp == nil) and SafeCall(UnitIsUnit, unit, "target") then
+        okHp, rawHp = pcall(UnitHealth, "target")
     end
-    
-    if not hp or hp <= 0 or not maxHp or maxHp <= 0 then
-        -- Modern WoW / Midnight fallback via UnitHealthPercent
-        if UnitHealthPercent then
-            local curve = CurveConstants and CurveConstants.ScaleTo100
-            local okP, hpPct = pcall(UnitHealthPercent, unit, false, curve)
-            if (not okP or not hpPct) and SafeCall(UnitIsUnit, unit, "target") then
-                okP, hpPct = pcall(UnitHealthPercent, "target", false, curve)
-            end
-            if okP and hpPct and type(hpPct) == "number" and not IsSecret(hpPct) and hpPct > 0 then
-                local mHp = frame.lastKnownMaxHp or (frame.healthBar and frame.healthBar.lastKnownMaxHp)
-                if not mHp or mHp <= 0 then
-                    local mobLevel = SafeCall(UnitLevel, unit) or 70
-                    mHp = mobLevel * 50
-                end
-                maxHp = mHp
-                hp = math.floor(maxHp * (hpPct / 100))
-            end
-        end
+    if (not okMax or rawMaxHp == nil) and SafeCall(UnitIsUnit, unit, "target") then
+        okMax, rawMaxHp = pcall(UnitHealthMax, "target")
     end
-    
-    if not hp or hp <= 0 or not maxHp or maxHp <= 0 then
+
+    local dotDmg = MP:GetUnitDoTDamage(unit, frame)
+    if dotDmg <= 0 or not okHp or rawHp == nil or not okMax or rawMaxHp == nil then
         frame.isDotLethal = false
-        if frame.lethalSkull then frame.lethalSkull:Hide() end
+        if frame.lethalSkullWindow then frame.lethalSkullWindow:Hide() end
+        if frame.dotPredictionWindow then frame.dotPredictionWindow:Hide() end
         if frame.dotPredictionBar then frame.dotPredictionBar:Hide() end
+        if frame.lethalBarWindow then frame.lethalBarWindow:Hide() end
         if frame.hpText then frame.hpText:SetTextColor(1, 1, 1) end
         return false
     end
-    
-    local dotDmg = MP:GetUnitDoTDamage(unit)
-    local isLethal = (dotDmg >= hp) and (dotDmg > 0)
+
+    local isLethal = false
+    if not IsSecret(rawHp) and type(rawHp) == "number" and rawHp > 0 then
+        isLethal = (dotDmg >= rawHp)
+    end
     frame.isDotLethal = isLethal
-    
-    -- 1. Skull Marker (💀 next to unit name)
-    if frame.lethalSkull then
-        if isLethal and MP.db.dotLethalSkull then
-            frame.lethalSkull:Show()
+
+    -- 1. Lethal Skull Marker via SetClipsChildren + StatusBar (works on secret HP)
+    if frame.lethalSkullWindow and frame.lethalSkullBar then
+        if MP.db.dotLethalSkull then
+            pcall(frame.lethalSkullBar.SetMinMaxValues, frame.lethalSkullBar, 0, rawHp)
+            pcall(frame.lethalSkullBar.SetValue, frame.lethalSkullBar, dotDmg)
+            frame.lethalSkullWindow:Show()
         else
-            frame.lethalSkull:Hide()
+            frame.lethalSkullWindow:Hide()
         end
     end
-    
-    -- 2. DoT Prediction Bar (Ghost overlay on health bar)
+
+    -- 2. DoT Prediction Bar via clipped reverse-fill StatusBar (vivid purple chunk extending leftward from HP edge)
     if frame.dotPredictionBar then
-        if dotDmg > 0 and MP.db.dotLethalPrediction then
-            local barWidth = frame.healthBar:GetWidth()
-            local curHpRatio = math.max(0, math.min(1, hp / maxHp))
-            local predRatio = math.max(0, math.min(curHpRatio, dotDmg / maxHp))
-            local rightOffset = curHpRatio * barWidth
-            local predWidth = predRatio * barWidth
-            
-            frame.dotPredictionBar:ClearAllPoints()
-            frame.dotPredictionBar:SetPoint("TOPRIGHT", frame.healthBar, "TOPLEFT", rightOffset, 0)
-            frame.dotPredictionBar:SetPoint("BOTTOMRIGHT", frame.healthBar, "BOTTOMLEFT", rightOffset, 0)
-            frame.dotPredictionBar:SetWidth(math.max(1, predWidth))
-            
+        if MP.db.dotLethalPrediction then
+            frame.dotPredictionBar:SetWidth(math.max(1, (frame:GetWidth() or MP.db.width or 100) - 2))
+            pcall(frame.dotPredictionBar.SetMinMaxValues, frame.dotPredictionBar, 0, rawMaxHp)
+            pcall(frame.dotPredictionBar.SetValue, frame.dotPredictionBar, dotDmg)
             if isLethal then
-                frame.dotPredictionBar:SetVertexColor(0.85, 0.25, 0.95, 0.65)
+                frame.dotPredictionBar:SetStatusBarColor(0.85, 0.25, 0.98, 1.0)
             else
-                frame.dotPredictionBar:SetVertexColor(0.7, 0.3, 0.85, 0.35)
+                frame.dotPredictionBar:SetStatusBarColor(0.78, 0.22, 0.96, 0.90)
             end
+            if frame.dotPredictionWindow then frame.dotPredictionWindow:Show() end
             frame.dotPredictionBar:Show()
         else
+            if frame.dotPredictionWindow then frame.dotPredictionWindow:Hide() end
             frame.dotPredictionBar:Hide()
         end
     end
-    
-    -- 3. Health Text Color
-    if isLethal and MP.db.dotLethalHpText then
-        frame.hpText:SetTextColor(0.95, 0.4, 1.0)
-    else
-        frame.hpText:SetTextColor(1, 1, 1)
+
+    -- 2b. Secret-safe Lethal Purple Health Bar Overlay (turns filled bar purple when dotDmg >= secret hp)
+    if frame.lethalBarWindow and frame.lethalBarDriver then
+        if MP.db.dotLethalBar then
+            pcall(frame.lethalBarDriver.SetMinMaxValues, frame.lethalBarDriver, 0, rawHp)
+            pcall(frame.lethalBarDriver.SetValue, frame.lethalBarDriver, dotDmg)
+            frame.lethalBarWindow:Show()
+        else
+            frame.lethalBarWindow:Hide()
+        end
     end
-    
+
+    -- 3. Health Text Color (on non-secret clients)
+    if frame.hpText then
+        if isLethal and MP.db.dotLethalHpText then
+            frame.hpText:SetTextColor(0.95, 0.4, 1.0)
+        else
+            frame.hpText:SetTextColor(1, 1, 1)
+        end
+    end
+
     return isLethal
 end
 
@@ -1317,6 +1550,65 @@ function MP:GetHighestGroupThreat(unit)
     return maxPct
 end
 
+-- Pulsing border alert on non-target plates losing or pulling aggro
+function MP:UpdateAggroFlash(frame, status)
+    if not frame or not frame.aggroFlash then return end
+    if not MP.db.enableThreat or not MP.db.aggroLossFlash or not frame.unit or status == nil or IsSecret(status) then
+        if frame.aggroFlashAnim and frame.aggroFlashAnim:IsPlaying() then
+            frame.aggroFlashAnim:Stop()
+        end
+        if frame.aggroFlash:IsShown() then
+            frame.aggroFlash:Hide()
+            MP:UpdatePlateAlphaAndScale(frame)
+        end
+        return
+    end
+
+    local unit = frame.unit
+    if SafeCall(UnitIsPlayer, unit) or not SafeCall(UnitCanAttack, "player", unit) or SafeCall(UnitIsUnit, unit, "target") then
+        if frame.aggroFlashAnim and frame.aggroFlashAnim:IsPlaying() then
+            frame.aggroFlashAnim:Stop()
+        end
+        if frame.aggroFlash:IsShown() then
+            frame.aggroFlash:Hide()
+            MP:UpdatePlateAlphaAndScale(frame)
+        end
+        return
+    end
+
+    local alertR, alertG, alertB
+    if MP.db.tankMode then
+        if status == 0 or status == 1 then
+            alertR, alertG, alertB = MP:GetConfiguredThreatRGB("threatColorDanger", 0.9, 0.2, 0.2)
+        elseif status == 2 then
+            alertR, alertG, alertB = MP:GetConfiguredThreatRGB("threatColorWarning", 0.9, 0.6, 0.0)
+        end
+    else
+        if status == 3 or status == 2 then
+            alertR, alertG, alertB = MP:GetConfiguredThreatRGB("threatColorDanger", 0.9, 0.2, 0.2)
+        end
+    end
+
+    if alertR then
+        frame.aggroFlash:SetBackdropBorderColor(alertR, alertG, alertB, 1)
+        if not frame.aggroFlash:IsShown() then
+            frame.aggroFlash:Show()
+        end
+        if frame.aggroFlashAnim and not frame.aggroFlashAnim:IsPlaying() then
+            frame.aggroFlashAnim:Play()
+        end
+        frame:SetAlpha(1.0)
+    else
+        if frame.aggroFlashAnim and frame.aggroFlashAnim:IsPlaying() then
+            frame.aggroFlashAnim:Stop()
+        end
+        if frame.aggroFlash:IsShown() then
+            frame.aggroFlash:Hide()
+            MP:UpdatePlateAlphaAndScale(frame)
+        end
+    end
+end
+
 -- Update threat status and percentage
 function MP:UpdateThreat(frame)
     local unit = frame.unit
@@ -1325,13 +1617,17 @@ function MP:UpdateThreat(frame)
     -- First update health color
     MP:UpdateHealthColor(frame)
     
-    -- Sync raid icon state
+    -- Sync raid icon and Target-of-Target state
     MP:UpdateRaidIcon(frame)
+    MP:UpdateTargetOfTarget(frame)
     
     -- Sync threat percentage display
     if not MP.db.enableThreat then
         local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+        frame.threatSnapshot = nil
+        frame.threatText:SetAlpha(1.0)
         frame.threatText:SetText("")
+        MP:UpdateAggroFlash(frame, nil)
         if hadThreat then
             MP:UpdateHealth(frame)
         end
@@ -1340,6 +1636,9 @@ function MP:UpdateThreat(frame)
     
     if SafeCall(UnitCanAttack, "player", unit) then
         local isTanking, status, scaledPercentage, rawPercentage = SafeThreat(unit)
+        local rawGuid = SafeCall(UnitGUID, unit)
+        local safeGuid = (rawGuid and not IsSecret(rawGuid)) and rawGuid or nil
+        MP:UpdateAggroFlash(frame, status)
         
         if status ~= nil and not IsSecret(status) then
             local displayPercentage = 0
@@ -1352,37 +1651,104 @@ function MP:UpdateThreat(frame)
                 if secondThreat and not IsSecret(secondThreat) and secondThreat > 0 then
                     displayPercentage = 100 - secondThreat
                     isLead = true
+                    if displayPercentage > 130 then
+                        displayPercentage = 130
+                    elseif displayPercentage < -130 then
+                        displayPercentage = -130
+                    end
+                    local newText = (displayPercentage >= 0)
+                        and format("+%d%%", floor(displayPercentage))
+                        or format("%d%%", floor(displayPercentage))
+                    local r, g, b = MP:GetThreatColor(status, displayPercentage, MP.db.tankMode, true)
+                    if MP.db.threatSnapshots then
+                        local snap = {
+                            text = newText,
+                            pct = displayPercentage,
+                            status = status,
+                            isLead = true,
+                            r = r, g = g, b = b,
+                            timestamp = GetTime(),
+                            unit = unit,
+                            guid = safeGuid,
+                        }
+                        frame.threatSnapshot = snap
+                        if safeGuid then
+                            MP.threatSnapshots[safeGuid] = snap
+                        end
+                    end
+                    local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+                    frame.threatText:SetAlpha(1.0)
+                    frame.threatText:SetTextColor(r, g, b)
+                    if frame.threatText:GetText() ~= newText then
+                        frame.threatText:SetText(newText)
+                        if not hadThreat then
+                            MP:UpdateHealth(frame)
+                        end
+                    end
+                    return
                 else
+                    -- Check for a recent Threat Snapshot on off-target mobs before falling back to 100%
+                    if MP.db.threatSnapshots and status == 3 then
+                        local snap = nil
+                        local localSnap = frame.threatSnapshot
+                        if localSnap and localSnap.unit == unit and (not safeGuid or localSnap.guid == safeGuid) then
+                            snap = localSnap
+                        elseif safeGuid and MP.threatSnapshots[safeGuid] then
+                            snap = MP.threatSnapshots[safeGuid]
+                            frame.threatSnapshot = snap
+                        end
+                        local duration = MP.db.threatSnapshotDuration or 6
+                        if snap and snap.isLead then
+                            local elapsed = GetTime() - snap.timestamp
+                            if elapsed <= duration then
+                                local snapText = snap.text .. "*"
+                                local alpha = 1.0
+                                if elapsed > 2.0 then
+                                    local t = (elapsed - 2.0) / math.max(1, duration - 2.0)
+                                    alpha = math.max(0.45, 1.0 - 0.55 * t)
+                                end
+                                local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+                                frame.threatText:SetTextColor(snap.r, snap.g, snap.b)
+                                frame.threatText:SetAlpha(alpha)
+                                if frame.threatText:GetText() ~= snapText then
+                                    frame.threatText:SetText(snapText)
+                                    if not hadThreat then
+                                        MP:UpdateHealth(frame)
+                                    end
+                                end
+                                return
+                            else
+                                frame.threatSnapshot = nil
+                                if safeGuid then MP.threatSnapshots[safeGuid] = nil end
+                            end
+                        end
+                    elseif status == 2 then
+                        frame.threatSnapshot = nil
+                        if safeGuid then MP.threatSnapshots[safeGuid] = nil end
+                    end
                     -- Solo or nobody else has threat: show 100% full aggro
                     displayPercentage = 100
                     isLead = false
                 end
             else
-                -- We don't hold aggro, show our threat percentage relative to the tank
+                -- We don't hold aggro, clear any stale tank snapshot and show relative %
+                frame.threatSnapshot = nil
+                if safeGuid then MP.threatSnapshots[safeGuid] = nil end
                 displayPercentage = NormalizePct(scaledPercentage, rawPercentage)
                 isLead = false
             end
             
-            if isLead or (displayPercentage and displayPercentage > 0) then
+            if displayPercentage and displayPercentage > 0 then
                 if displayPercentage > 130 then
                     displayPercentage = 130
                 elseif displayPercentage < -130 then
                     displayPercentage = -130
                 end
                 
-                local newText
-                if isLead then
-                    if displayPercentage >= 0 then
-                        newText = format("+%d%%", floor(displayPercentage))
-                    else
-                        newText = format("%d%%", floor(displayPercentage))
-                    end
-                else
-                    newText = format("%d%%", floor(displayPercentage))
-                end
-                
-                local r, g, b = MP:GetThreatColor(status, displayPercentage, MP.db.tankMode, isLead)
+                local newText = format("%d%%", floor(displayPercentage))
+                local r, g, b = MP:GetThreatColor(status, displayPercentage, MP.db.tankMode, false)
                 local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+                frame.threatText:SetAlpha(1.0)
                 frame.threatText:SetTextColor(r, g, b)
                 if frame.threatText:GetText() ~= newText then
                     frame.threatText:SetText(newText)
@@ -1398,6 +1764,7 @@ function MP:UpdateThreat(frame)
             if pctVal and pctVal > 0 then
                 if pctVal > 130 then pctVal = 130 end
                 local newText = format("%d%%", floor(pctVal))
+                frame.threatText:SetAlpha(1.0)
                 frame.threatText:SetTextColor(0.9, 0.8, 0.2)
                 if frame.threatText:GetText() ~= newText then
                     frame.threatText:SetText(newText)
@@ -1406,8 +1773,12 @@ function MP:UpdateThreat(frame)
                 return
             end
         end
+    else
+        MP:UpdateAggroFlash(frame, nil)
     end
     local hadThreat = (frame.threatText:GetText() ~= nil and frame.threatText:GetText() ~= "")
+    frame.threatSnapshot = nil
+    frame.threatText:SetAlpha(1.0)
     if hadThreat then
         frame.threatText:SetText("")
         MP:UpdateHealth(frame)
@@ -1450,7 +1821,7 @@ function MP:UpdateHealth(frame)
             frame.lastKnownHp = tHp
             local percent = floor((tHp / tMax) * 100)
             if compactHp then
-                frame.hpText:SetText(format("(%d%%)", percent))
+                frame.hpText:SetText(format("%d%%", percent))
             else
                 if tHp >= 1000000 then
                     frame.hpText:SetText(format("%.1fM (%d%%)", tHp / 1000000, percent))
@@ -1468,7 +1839,7 @@ function MP:UpdateHealth(frame)
     if not displaySet and not IsSecret(hp) and not IsSecret(maxHp) and hp and maxHp then
         local percent = maxHp > 0 and floor((hp / maxHp) * 100) or 0
         if compactHp then
-            frame.hpText:SetText(format("(%d%%)", percent))
+            frame.hpText:SetText(format("%d%%", percent))
         else
             if hp >= 1000000 then
                 frame.hpText:SetText(format("%.1fM (%d%%)", hp / 1000000, percent))
@@ -1492,7 +1863,7 @@ function MP:UpdateHealth(frame)
             end
             if okP and hpPct then
                 if compactHp then
-                    local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "(%.0f%%)", hpPct)
+                    local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "%.0f%%", hpPct)
                     if okFmt then displayFormatted = true end
                 else
                     local okFmt = pcall(frame.hpText.SetFormattedText, frame.hpText, "%s (%.0f%%)", hp, hpPct)
@@ -1648,6 +2019,188 @@ function MP:UpdateRaidIcon(frame)
     end
 end
 
+-- Update target plate scale and non-target brightness/alpha
+function MP:UpdatePlateAlphaAndScale(frame)
+    if not frame or not frame.unit then return end
+    local isTarget = SafeCall(UnitIsUnit, frame.unit, "target")
+    local hasTarget = SafeCall(UnitExists, "target")
+    if isTarget then
+        local tScale = (MP.db.targetScale or 100) / 100
+        if frame:GetScale() ~= tScale then frame:SetScale(tScale) end
+        frame:SetAlpha(1.0)
+    else
+        if frame:GetScale() ~= 1.0 then frame:SetScale(1.0) end
+        if not hasTarget or (frame.aggroFlash and frame.aggroFlash:IsShown()) then
+            frame:SetAlpha(1.0)
+        else
+            local ntAlpha = math.max(0.4, math.min(1.0, (MP.db.nonTargetAlpha or 100) / 100))
+            frame:SetAlpha(ntAlpha)
+        end
+    end
+end
+
+-- Adjust castBar and totText anchors beneath health bar / combo points
+function MP:UpdateBelowBarAnchors(frame)
+    if not frame then return end
+    local isBlizz = (MP.db and MP.db.blizzStyle) and true or false
+    local comboShown = frame.comboFrame and frame.comboFrame:IsShown()
+    if frame.castBar then
+        local castGap = (isBlizz and -6 or -4) - (comboShown and 8 or 0)
+        frame.castBar:ClearAllPoints()
+        frame.castBar:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", 0, castGap)
+        frame.castBar:SetPoint("TOPRIGHT", frame, "BOTTOMRIGHT", 0, castGap)
+    end
+    if frame.totText then
+        frame.totText:ClearAllPoints()
+        if frame.castBar and frame.castBar:IsShown() then
+            frame.totText:SetPoint("TOP", frame.castBar, "BOTTOM", 0, -2)
+        elseif comboShown then
+            frame.totText:SetPoint("TOP", frame.comboFrame, "BOTTOM", 0, -2)
+        else
+            frame.totText:SetPoint("TOP", frame, "BOTTOM", 0, -2)
+        end
+    end
+end
+
+-- Position Target-of-Target text cleanly beneath cast bar, combo points, or health bar
+function MP:UpdateToTAnchor(frame)
+    MP:UpdateBelowBarAnchors(frame)
+end
+
+-- Update Combo Points pips on the active target nameplate
+function MP:UpdateComboPoints(frame, overrideCp, overrideMax)
+    if not frame or not frame.comboFrame then return end
+    if not MP.db.showComboPoints or not frame.unit or not SafeCall(UnitIsUnit, frame.unit, "target") then
+        frame.comboFrame:Hide()
+        MP:UpdateBelowBarAnchors(frame)
+        return
+    end
+    if not overrideCp and not SafeCall(UnitCanAttack, "player", frame.unit) then
+        frame.comboFrame:Hide()
+        MP:UpdateBelowBarAnchors(frame)
+        return
+    end
+
+    local cp, maxCp
+    if overrideCp then
+        cp = overrideCp
+        maxCp = overrideMax or 5
+    else
+        cp, maxCp = GetPlayerComboPoints()
+    end
+
+    if not cp or cp <= 0 then
+        frame.comboFrame:Hide()
+        MP:UpdateBelowBarAnchors(frame)
+        return
+    end
+
+    local isBlizz = (MP.db and MP.db.blizzStyle) and true or false
+    local plateW = frame:GetWidth() or MP.db.width or 100
+    local gap = 2
+    local pipW = math.max(4, (plateW - (maxCp - 1) * gap) / maxCp)
+    local yOff = isBlizz and -5 or -2
+
+    frame.comboFrame:ClearAllPoints()
+    frame.comboFrame:SetPoint("TOP", frame, "BOTTOM", 0, yOff)
+    frame.comboFrame:SetSize(plateW, 6)
+
+    for i = 1, 7 do
+        local pip = frame.comboPips and frame.comboPips[i]
+        if pip then
+            if i <= maxCp then
+                pip:ClearAllPoints()
+                pip:SetSize(pipW, 6)
+                pip:SetPoint("TOPLEFT", frame.comboFrame, "TOPLEFT", (i - 1) * (pipW + gap), 0)
+                if i <= cp then
+                    if i <= 3 then
+                        pip.fill:SetVertexColor(1.0, 0.85, 0.1, 1.0) -- Gold (1-3)
+                    elseif i == 4 then
+                        pip.fill:SetVertexColor(1.0, 0.55, 0.0, 1.0) -- Orange (4)
+                    else
+                        pip.fill:SetVertexColor(1.0, 0.15, 0.15, 1.0) -- Red (5+)
+                    end
+                else
+                    pip.fill:SetVertexColor(0.15, 0.15, 0.15, 0.7) -- Empty slot
+                end
+                pip:Show()
+            else
+                pip:Hide()
+            end
+        end
+    end
+
+    frame.comboFrame:Show()
+    MP:UpdateBelowBarAnchors(frame)
+end
+
+-- Update Target-of-Target name below enemy nameplate
+function MP:UpdateTargetOfTarget(frame)
+    if not frame or not frame.totText then return end
+    if not MP.db.showTargetOfTarget or not frame.unit then
+        frame.totText:SetText("")
+        return
+    end
+    if not SafeCall(UnitCanAttack, "player", frame.unit) then
+        frame.totText:SetText("")
+        return
+    end
+
+    local checkUnit = ResolveBestUnitToken(frame.unit)
+    local totUnit = checkUnit .. "target"
+    if not SafeCall(UnitExists, totUnit) then
+        if checkUnit ~= frame.unit then
+            totUnit = frame.unit .. "target"
+        end
+        if not SafeCall(UnitExists, totUnit) then
+            frame.totText:SetText("")
+            return
+        end
+    end
+
+    if SafeCall(UnitIsUnit, totUnit, "player") then
+        if MP.db.totHideSelf then
+            frame.totText:SetText("")
+            return
+        end
+        frame.totText:SetText("» You")
+        frame.totText:SetTextColor(0.4, 1.0, 0.4)
+        MP:UpdateToTAnchor(frame)
+        return
+    end
+
+    local okN, totName = pcall(UnitName, totUnit)
+    if not okN or totName == nil then
+        frame.totText:SetText("")
+        return
+    end
+
+    local r, g, b = 0.9, 0.85, 0.5
+    if SafeCall(UnitIsPlayer, totUnit) then
+        local okC, _, class = pcall(UnitClass, totUnit)
+        if okC and class and not IsSecret(class) and RAID_CLASS_COLORS[class] then
+            local c = RAID_CLASS_COLORS[class]
+            r, g, b = c.r, c.g, c.b
+        else
+            r, g, b = 1.0, 0.85, 0.3
+        end
+    end
+    frame.totText:SetTextColor(r, g, b)
+
+    if IsSecret(totName) then
+        local okFmt = pcall(frame.totText.SetFormattedText, frame.totText, "» %s", totName)
+        if not okFmt then
+            pcall(frame.totText.SetText, frame.totText, totName)
+        end
+    else
+        if #totName > 15 then
+            totName = string.sub(totName, 1, 14) .. "..."
+        end
+        frame.totText:SetText("» " .. totName)
+    end
+    MP:UpdateToTAnchor(frame)
+end
+
 -- Update target highlights (glow/brackets)
 function MP:UpdateTargetHighlight(frame)
     local unit = frame.unit
@@ -1685,6 +2238,8 @@ function MP:UpdateTargetHighlight(frame)
         frame.leftBracket:Hide()
         frame.rightBracket:Hide()
     end
+
+    MP:UpdatePlateAlphaAndScale(frame)
 end
 
 -- Cast bar OnUpdate handler (smooth progress + throttled font rasterization)
@@ -1699,6 +2254,7 @@ local function CastBar_OnUpdate(self, elapsed)
     if not self.endTime or IsSecret(self.endTime) then
         self:Hide()
         self:SetScript("OnUpdate", nil)
+        MP:UpdateToTAnchor(self:GetParent())
         return
     end
     
@@ -1706,6 +2262,7 @@ local function CastBar_OnUpdate(self, elapsed)
     if currentTime >= self.endTime then
         self:Hide()
         self:SetScript("OnUpdate", nil)
+        MP:UpdateToTAnchor(self:GetParent())
         return
     end
     
@@ -1735,6 +2292,7 @@ function MP:StartCast(frame, unit)
     if not unit then
         frame.castBar:Hide()
         frame.castBar:SetScript("OnUpdate", nil)
+        MP:UpdateToTAnchor(frame)
         return
     end
     
@@ -1771,6 +2329,7 @@ function MP:StartCast(frame, unit)
         frame.castBar.isCombatLogCast = false
         frame.castBar:Hide()
         frame.castBar:SetScript("OnUpdate", nil)
+        MP:UpdateToTAnchor(frame)
         return
     end
     
@@ -1826,6 +2385,7 @@ function MP:StartCast(frame, unit)
     
     castBar:SetScript("OnUpdate", CastBar_OnUpdate)
     castBar:Show()
+    MP:UpdateToTAnchor(frame)
 end
 
 function MP:StartCombatLogCast(frame, spellName, icon, castTimeMS)
@@ -1854,6 +2414,7 @@ function MP:StartCombatLogCast(frame, spellName, icon, castTimeMS)
     castBar:SetValue(0)
     castBar:SetScript("OnUpdate", CastBar_OnUpdate)
     castBar:Show()
+    MP:UpdateToTAnchor(frame)
 end
 
 function MP:StopCast(frame)
@@ -1861,6 +2422,7 @@ function MP:StopCast(frame)
         frame.castBar.isCombatLogCast = false
         frame.castBar:Hide()
         frame.castBar:SetScript("OnUpdate", nil)
+        MP:UpdateToTAnchor(frame)
     end
 end
 
@@ -2132,10 +2694,52 @@ function MP:UpdateDebuffs(frame)
     MP:UpdateRaidIcon(frame)
 end
 
+-- Toggle between modern flat style and Blizzard default nameplate aesthetic
+function MP:ApplyPlateStyle(frame)
+    if not frame then return end
+    local isBlizz = (MP.db and MP.db.blizzStyle) and true or false
+
+    if frame.blizzBorder then
+        if isBlizz then frame.blizzBorder:Show() else frame.blizzBorder:Hide() end
+    end
+    if frame.blizzHighlight then
+        if isBlizz then frame.blizzHighlight:Show() else frame.blizzHighlight:Hide() end
+    end
+    if frame.castBar and frame.castBar.blizzBorder then
+        if isBlizz then frame.castBar.blizzBorder:Show() else frame.castBar.blizzBorder:Hide() end
+    end
+    if frame.bg then
+        frame.bg:SetVertexColor(0, 0, 0, isBlizz and 0.85 or 0.75)
+    end
+    if frame.nameText then
+        frame.nameText:SetShadowOffset(1, -1)
+        frame.nameText:SetShadowColor(0, 0, 0, 1)
+    end
+
+    local pad = isBlizz and 3 or 1
+    if frame.targetGlow then
+        local glowOffset = pad + (MP.db.glowThickness or 1)
+        frame.targetGlow:ClearAllPoints()
+        frame.targetGlow:SetPoint("TOPLEFT", frame, "TOPLEFT", -glowOffset, glowOffset)
+        frame.targetGlow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", glowOffset, -glowOffset)
+    end
+    if frame.aggroFlash then
+        local flashOffset = pad + 1
+        frame.aggroFlash:ClearAllPoints()
+        frame.aggroFlash:SetPoint("TOPLEFT", frame, "TOPLEFT", -flashOffset, flashOffset)
+        frame.aggroFlash:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", flashOffset, -flashOffset)
+    end
+    MP:UpdateBelowBarAnchors(frame)
+end
+
 -- Setup/Re-apply all visual configurations to existing custom plates
 function MP:ApplyAllSettings()
-    SetCVar("nameplateMotion", MP.db.stackingPlates and 1 or 0)
-    SetCVar("nameplateMaxDistance", MP.db.maxDistance or 41)
+    if not InCombatLockdown() then
+        pcall(SetCVar, "nameplateMotion", MP.db.stackingPlates and 1 or 0)
+        pcall(SetCVar, "nameplateMaxDistance", MP.db.maxDistance or 41)
+        pcall(SetCVar, "nameplateMinAlpha", 1.0)
+        pcall(SetCVar, "nameplateMaxAlpha", 1.0)
+    end
     for _, namePlate in ipairs(C_NamePlate.GetNamePlates()) do
         HideBlizzardPlate(namePlate)
         local frame = namePlate.mpFrame
@@ -2149,7 +2753,18 @@ function MP:ApplyAllSettings()
             frame.healthBar:SetStatusBarTexture(barTex)
             frame.castBar:SetStatusBarTexture(barTex)
             if frame.dotPredictionBar then
-                frame.dotPredictionBar:SetTexture(barTex)
+                frame.dotPredictionBar:SetStatusBarTexture(barTex)
+                frame.dotPredictionBar:SetWidth(math.max(1, (MP.db.width or 100) - 2))
+            end
+            if frame.lethalBarFill then
+                frame.lethalBarFill:SetTexture(barTex)
+            end
+            if frame.comboPips then
+                for i = 1, 7 do
+                    if frame.comboPips[i] and frame.comboPips[i].fill then
+                        frame.comboPips[i].fill:SetTexture(barTex)
+                    end
+                end
             end
             
             -- Fonts & Anchors
@@ -2163,6 +2778,12 @@ function MP:ApplyAllSettings()
             if frame.lethalSkull then
                 local skullSize = math.max(12, fSizeName + 2)
                 frame.lethalSkull:SetSize(skullSize, skullSize)
+                if frame.lethalSkullWindow then
+                    frame.lethalSkullWindow:SetSize(skullSize, skullSize)
+                end
+                if frame.lethalSkullBar then
+                    frame.lethalSkullBar:SetSize(10000, skullSize)
+                end
             end
             frame.levelText:SetFont(fontPath, fSizeLevel, "OUTLINE")
             frame.levelText:ClearAllPoints()
@@ -2176,6 +2797,9 @@ function MP:ApplyAllSettings()
             frame.rightBracket:SetFont(fontPath, 16, "OUTLINE")
             frame.castBar.text:SetFont(fontPath, 9, "OUTLINE")
             frame.castBar.timeText:SetFont(fontPath, 9, "OUTLINE")
+            if frame.totText then
+                frame.totText:SetFont(fontPath, math.max(8, fSizeName - 1), "OUTLINE")
+            end
             for i = 1, 5 do
                 if frame.auraIcons[i] then
                     frame.auraIcons[i].count:SetFont(fontPath, fSizeDebuff, "OUTLINE")
@@ -2257,6 +2881,7 @@ function MP:ApplyAllSettings()
             frame.leftBracket:SetTextColor(gr, gg, gb)
             frame.rightBracket:SetTextColor(gr, gg, gb)
             
+            MP:ApplyPlateStyle(frame)
             MP:UpdateAll(frame)
         end
     end
@@ -2269,6 +2894,8 @@ function MP:UpdateAll(frame)
     MP:UpdateName(frame)
     MP:UpdateLevel(frame)
     MP:UpdateTargetHighlight(frame)
+    MP:UpdateComboPoints(frame)
+    MP:UpdateTargetOfTarget(frame)
     MP:UpdateRaidIcon(frame)
     MP:StartCast(frame, frame.unit)
     MP:UpdateDebuffs(frame)
@@ -2309,12 +2936,64 @@ local function CreateCustomPlate(namePlate)
     health:SetFrameLevel(frame:GetFrameLevel() + 1)
     frame.healthBar = health
     
-    -- DoT Damage Prediction Overlay Bar (Ghost bar on the health bar)
-    local dotBar = health:CreateTexture(nil, "ARTWORK", nil, 2)
-    dotBar:SetTexture(MP:GetBarTexture())
-    dotBar:SetVertexColor(0.85, 0.25, 0.95, 0.5)
-    dotBar:Hide()
+    -- DoT Damage Prediction Overlay (clips to filled health bar, fills right-to-left from current HP edge in vivid purple)
+    local dotBarWin = CreateFrame("Frame", nil, health)
+    dotBarWin:SetAllPoints(health:GetStatusBarTexture())
+    dotBarWin:SetFrameLevel(health:GetFrameLevel() + 1)
+    dotBarWin:SetClipsChildren(true)
+    dotBarWin:Hide()
+    frame.dotPredictionWindow = dotBarWin
+
+    local dotBar = CreateFrame("StatusBar", nil, dotBarWin)
+    dotBar:SetPoint("TOPRIGHT", dotBarWin, "TOPRIGHT", 0, 0)
+    dotBar:SetPoint("BOTTOMRIGHT", dotBarWin, "BOTTOMRIGHT", 0, 0)
+    dotBar:SetWidth(math.max(1, (MP.db.width or 100) - 2))
+    dotBar:SetReverseFill(true)
+    dotBar:SetStatusBarTexture(MP:GetBarTexture())
+    dotBar:SetStatusBarColor(0.78, 0.22, 0.96, 0.90)
     frame.dotPredictionBar = dotBar
+
+    -- Secret-safe Lethal Purple Health Bar Overlay (slides solid purple over health fill when dotDmg >= secret UnitHealth)
+    local lethalBarWin = CreateFrame("Frame", nil, health)
+    lethalBarWin:SetAllPoints(health:GetStatusBarTexture())
+    lethalBarWin:SetFrameLevel(health:GetFrameLevel() + 2)
+    lethalBarWin:SetClipsChildren(true)
+    lethalBarWin:Hide()
+    frame.lethalBarWindow = lethalBarWin
+
+    local lethalBarDriver = CreateFrame("StatusBar", nil, lethalBarWin)
+    lethalBarDriver:SetPoint("TOPRIGHT", lethalBarWin, "TOPRIGHT", 0, 0)
+    lethalBarDriver:SetPoint("BOTTOMRIGHT", lethalBarWin, "BOTTOMRIGHT", 0, 0)
+    lethalBarDriver:SetWidth(50000)
+    lethalBarDriver:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+    lethalBarDriver:SetStatusBarColor(0, 0, 0, 0)
+    frame.lethalBarDriver = lethalBarDriver
+
+    local lethalBarFill = lethalBarDriver:CreateTexture(nil, "OVERLAY")
+    lethalBarFill:SetTexture(MP:GetBarTexture())
+    lethalBarFill:SetVertexColor(0.85, 0.25, 0.95, 1.0)
+    lethalBarFill:SetPoint("TOP", lethalBarWin, "TOP", 0, 0)
+    lethalBarFill:SetPoint("BOTTOM", lethalBarWin, "BOTTOM", 0, 0)
+    lethalBarFill:SetPoint("RIGHT", lethalBarDriver:GetStatusBarTexture(), "RIGHT", 0, 0)
+    lethalBarFill:SetWidth(300)
+    frame.lethalBarFill = lethalBarFill
+
+    -- Text overlay above dotPredictionBar and lethalBarWindow so level/threat/HP stay crisp
+    local textOverlay = CreateFrame("Frame", nil, health)
+    textOverlay:SetAllPoints(health)
+    textOverlay:SetFrameLevel(health:GetFrameLevel() + 4)
+    textOverlay:EnableMouse(false)
+    frame.textOverlay = textOverlay
+
+    -- Blizzard Default Style subtle top bevel highlight
+    local blizzHighlight = textOverlay:CreateTexture(nil, "ARTWORK")
+    blizzHighlight:SetTexture("Interface\\Buttons\\WHITE8X8")
+    blizzHighlight:SetPoint("TOPLEFT", health, "TOPLEFT", 0, 0)
+    blizzHighlight:SetPoint("TOPRIGHT", health, "TOPRIGHT", 0, 0)
+    blizzHighlight:SetHeight(3)
+    blizzHighlight:SetVertexColor(1, 1, 1, 0.16)
+    blizzHighlight:Hide()
+    frame.blizzHighlight = blizzHighlight
     
     local fSizeLevel = MP.db.fontSizeLevel or 10
     local fSizeHealth = MP.db.fontSizeHealth or fSizeLevel
@@ -2326,32 +3005,45 @@ local function CreateCustomPlate(namePlate)
     nameText:SetTextColor(1, 1, 1)
     frame.nameText = nameText
     
-    -- Lethal DoT Skull Marker (Raid skull icon next to unit name)
-    local lethalSkull = frame:CreateTexture(nil, "OVERLAY")
+    -- Lethal DoT Skull Marker via SetClipsChildren + StatusBar (slides into view when dotDmg >= secret UnitHealth)
     local skullSize = math.max(12, (MP.db.fontSizeName or 11) + 2)
+    local skullWin = CreateFrame("Frame", nil, frame)
+    skullWin:SetSize(skullSize, skullSize)
+    skullWin:SetPoint("LEFT", nameText, "RIGHT", 4, 0)
+    skullWin:SetClipsChildren(true)
+    skullWin:Hide()
+    frame.lethalSkullWindow = skullWin
+
+    local skullBar = CreateFrame("StatusBar", nil, skullWin)
+    skullBar:SetSize(10000, skullSize)
+    skullBar:SetPoint("RIGHT", skullWin, "RIGHT", 0, 0)
+    skullBar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+    skullBar:SetStatusBarColor(0, 0, 0, 0)
+    frame.lethalSkullBar = skullBar
+
+    local lethalSkull = skullBar:CreateTexture(nil, "OVERLAY")
     lethalSkull:SetSize(skullSize, skullSize)
+    lethalSkull:SetPoint("RIGHT", skullBar:GetStatusBarTexture(), "RIGHT", 0, 0)
     lethalSkull:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
     lethalSkull:SetTexCoord(0.75, 1.0, 0.25, 0.5)
-    lethalSkull:SetPoint("LEFT", nameText, "RIGHT", 4, 0)
-    lethalSkull:Hide()
     frame.lethalSkull = lethalSkull
     
     -- Level Text (Left inside health bar)
-    local levelText = health:CreateFontString(nil, "OVERLAY")
+    local levelText = textOverlay:CreateFontString(nil, "OVERLAY")
     levelText:SetFont(fontPath, fSizeLevel, "OUTLINE")
     levelText:SetPoint("LEFT", health, "LEFT", 3, 0)
     levelText:SetJustifyH("LEFT")
     frame.levelText = levelText
     
     -- Health value text (Right inside health bar)
-    local hpText = health:CreateFontString(nil, "OVERLAY")
+    local hpText = textOverlay:CreateFontString(nil, "OVERLAY")
     hpText:SetFont(fontPath, fSizeHealth, "OUTLINE")
     hpText:SetPoint("RIGHT", health, "RIGHT", -3, 0)
     hpText:SetJustifyH("RIGHT")
     frame.hpText = hpText
     
     -- Threat Text (Centered between Level and Health)
-    local threatText = health:CreateFontString(nil, "OVERLAY")
+    local threatText = textOverlay:CreateFontString(nil, "OVERLAY")
     threatText:SetFont(fontPath, fSizeLevel, "OUTLINE")
     threatText:SetJustifyH("CENTER")
     threatText:SetWordWrap(false)
@@ -2388,6 +3080,46 @@ local function CreateCustomPlate(namePlate)
     glow:SetBackdropBorderColor(gr, gg, gb, ga)
     glow:Hide()
     frame.targetGlow = glow
+
+    -- Blizzard Default Style 9-sliced metallic border around health bar
+    local blizzBorder = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    blizzBorder:SetPoint("TOPLEFT", frame, "TOPLEFT", -3, 3)
+    blizzBorder:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 3, -3)
+    blizzBorder:SetFrameLevel(frame:GetFrameLevel() + 6)
+    blizzBorder:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+    })
+    blizzBorder:SetBackdropBorderColor(0.75, 0.75, 0.78, 1)
+    blizzBorder:Hide()
+    frame.blizzBorder = blizzBorder
+
+    -- Aggro Alert Flash Border (non-target aggro loss/pull pulse)
+    local aggroFlash = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    aggroFlash:SetPoint("TOPLEFT", frame, "TOPLEFT", -2, 2)
+    aggroFlash:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 2, -2)
+    aggroFlash:SetFrameLevel(frame:GetFrameLevel() + 5)
+    aggroFlash:SetBackdrop({
+        edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeSize = 2,
+    })
+    aggroFlash:SetBackdropBorderColor(0.9, 0.2, 0.2, 1)
+    aggroFlash:Hide()
+    frame.aggroFlash = aggroFlash
+
+    local flashAnim = aggroFlash:CreateAnimationGroup()
+    flashAnim:SetLooping("REPEAT")
+    local fadeOut = flashAnim:CreateAnimation("Alpha")
+    fadeOut:SetFromAlpha(1.0)
+    fadeOut:SetToAlpha(0.2)
+    fadeOut:SetDuration(0.35)
+    fadeOut:SetOrder(1)
+    local fadeIn = flashAnim:CreateAnimation("Alpha")
+    fadeIn:SetFromAlpha(0.2)
+    fadeIn:SetToAlpha(1.0)
+    fadeIn:SetDuration(0.35)
+    fadeIn:SetOrder(2)
+    frame.aggroFlashAnim = flashAnim
     
     -- Target bracket FontStrings (sleek » and « target markers)
     local leftBracket = frame:CreateFontString(nil, "OVERLAY")
@@ -2416,6 +3148,18 @@ local function CreateCustomPlate(namePlate)
     cast:Hide()
     frame.castBar = cast
 
+    local castBlizzBorder = CreateFrame("Frame", nil, cast, "BackdropTemplate")
+    castBlizzBorder:SetPoint("TOPLEFT", cast, "TOPLEFT", -2, 2)
+    castBlizzBorder:SetPoint("BOTTOMRIGHT", cast, "BOTTOMRIGHT", 2, -2)
+    castBlizzBorder:SetFrameLevel(cast:GetFrameLevel() + 2)
+    castBlizzBorder:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+    })
+    castBlizzBorder:SetBackdropBorderColor(0.75, 0.75, 0.78, 1)
+    castBlizzBorder:Hide()
+    cast.blizzBorder = castBlizzBorder
+
     local castBG = cast:CreateTexture(nil, "BACKGROUND")
     castBG:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
     castBG:SetVertexColor(0, 0, 0, 0.75)
@@ -2438,6 +3182,41 @@ local function CreateCustomPlate(namePlate)
     castTime:SetPoint("RIGHT", cast, "RIGHT", -3, 0)
     castTime:SetTextColor(1, 1, 1)
     cast.timeText = castTime
+
+    -- Combo Points Container & Pips (below health bar on target)
+    local comboFrame = CreateFrame("Frame", nil, frame)
+    comboFrame:SetSize(MP.db.width or 100, 6)
+    comboFrame:SetPoint("TOP", frame, "BOTTOM", 0, -2)
+    comboFrame:SetFrameLevel(frame:GetFrameLevel() + 8)
+    comboFrame:Hide()
+    frame.comboFrame = comboFrame
+
+    frame.comboPips = {}
+    for i = 1, 7 do
+        local pip = CreateFrame("Frame", nil, comboFrame)
+        pip:SetSize(16, 6)
+        local pbg = pip:CreateTexture(nil, "BACKGROUND")
+        pbg:SetAllPoints(pip)
+        pbg:SetColorTexture(0, 0, 0, 0.9)
+        pip.bg = pbg
+
+        local pfill = pip:CreateTexture(nil, "ARTWORK")
+        pfill:SetPoint("TOPLEFT", pip, "TOPLEFT", 1, -1)
+        pfill:SetPoint("BOTTOMRIGHT", pip, "BOTTOMRIGHT", -1, 1)
+        pfill:SetTexture(MP:GetBarTexture())
+        pip.fill = pfill
+
+        pip:Hide()
+        frame.comboPips[i] = pip
+    end
+
+    -- Target-of-Target Text (Centered beneath cast bar or health bar)
+    local totText = frame:CreateFontString(nil, "OVERLAY")
+    totText:SetFont(fontPath, math.max(8, (MP.db.fontSizeName or 10) - 1), "OUTLINE")
+    totText:SetPoint("TOP", frame, "BOTTOM", 0, -2)
+    totText:SetJustifyH("CENTER")
+    totText:SetText("")
+    frame.totText = totText
     
     -- Modern Midnight / Forever C-Engine AuraContainer (bypasses Lua taint & secret value restrictions)
     if HasAuraContainerSupport() then
@@ -2632,6 +3411,8 @@ local function CreateCustomPlate(namePlate)
         iconFrame:Hide()
         frame.auraIcons[i] = iconFrame
     end
+
+    MP:ApplyPlateStyle(frame)
 end
 
 -- Global Event Frame
@@ -2656,6 +3437,12 @@ SafeRegister("RAID_TARGET_UPDATE")
 SafeRegister("UNIT_HEALTH")
 SafeRegister("UNIT_MAXHEALTH")
 SafeRegister("UNIT_NAME_UPDATE")
+SafeRegister("UNIT_TARGET")
+SafeRegister("UNIT_COMBAT")
+SafeRegister("UNIT_POWER_UPDATE")
+SafeRegister("UNIT_POWER_FREQUENT")
+SafeRegister("UNIT_MAXPOWER")
+SafeRegister("PLAYER_COMBO_POINTS")
 SafeRegister("UNIT_THREAT_LIST_UPDATE")
 SafeRegister("UNIT_THREAT_SITUATION_UPDATE")
 SafeRegister("UNIT_AURA")
@@ -2747,15 +3534,33 @@ f:SetScript("OnEvent", function(self, event, ...)
     elseif event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         MP.playerGUID = UnitGUID("player")
         CachePlayerSpells()
-        -- Apply baseline CVars for nameplate stacking and scaling consistency
-        SetCVar("nameplateShowAll", 1)
-        SetCVar("nameplateSelectedScale", 1.0)
-        SetCVar("nameplateMinScale", 1.0)
-        SetCVar("nameplateMaxScale", 1.0)
-        SetCVar("nameplateMotion", MP.db.stackingPlates and 1 or 0)
-        SetCVar("nameplateOverlapV", 1.4)
-        SetCVar("nameplateOverlapH", 0.8)
-        SetCVar("nameplateMaxDistance", MP.db.maxDistance or 41)
+        if _G.DoesItDie and _G.DoesItDie.RegisterCallback and not MP.doesItDieHooked then
+            MP.doesItDieHooked = true
+            pcall(_G.DoesItDie.RegisterCallback, "MyPlates", function(_, cbUnit)
+                if cbUnit and MP.activePlates[cbUnit] then
+                    MP:UpdateDoTLethal(MP.activePlates[cbUnit])
+                elseif cbUnit then
+                    for npUnit, npFrame in pairs(MP.activePlates) do
+                        if SafeCall(UnitIsUnit, npUnit, cbUnit) then
+                            MP:UpdateDoTLethal(npFrame)
+                        end
+                    end
+                end
+            end)
+        end
+        -- Apply baseline CVars for nameplate stacking, alpha, and scaling consistency
+        if not InCombatLockdown() then
+            pcall(SetCVar, "nameplateShowAll", 1)
+            pcall(SetCVar, "nameplateSelectedScale", 1.0)
+            pcall(SetCVar, "nameplateMinScale", 1.0)
+            pcall(SetCVar, "nameplateMaxScale", 1.0)
+            pcall(SetCVar, "nameplateMinAlpha", 1.0)
+            pcall(SetCVar, "nameplateMaxAlpha", 1.0)
+            pcall(SetCVar, "nameplateMotion", MP.db.stackingPlates and 1 or 0)
+            pcall(SetCVar, "nameplateOverlapV", 1.4)
+            pcall(SetCVar, "nameplateOverlapH", 0.8)
+            pcall(SetCVar, "nameplateMaxDistance", MP.db.maxDistance or 41)
+        end
         
         -- Hook any plates already visible at logon
         for _, namePlate in ipairs(C_NamePlate.GetNamePlates()) do
@@ -2814,12 +3619,36 @@ f:SetScript("OnEvent", function(self, event, ...)
                 frame.raidIcon.currentIndex = nil
                 frame.raidIcon.currentYOffset = nil
             end
+            if frame.aggroFlashAnim and frame.aggroFlashAnim:IsPlaying() then
+                frame.aggroFlashAnim:Stop()
+            end
+            if frame.aggroFlash then
+                frame.aggroFlash:Hide()
+            end
+            frame.threatSnapshot = nil
+            if frame.threatText then
+                frame.threatText:SetAlpha(1.0)
+                frame.threatText:SetText("")
+            end
+            if frame.totText then
+                frame.totText:SetText("")
+            end
+            frame.trackedDots = nil
+            frame.isDotLethal = false
+            if frame.lethalSkullWindow then frame.lethalSkullWindow:Hide() end
+            if frame.dotPredictionWindow then frame.dotPredictionWindow:Hide() end
+            if frame.dotPredictionBar then frame.dotPredictionBar:Hide() end
+            if frame.lethalBarWindow then frame.lethalBarWindow:Hide() end
+            if frame.comboFrame then frame.comboFrame:Hide() end
+            frame:SetScale(1.0)
+            frame:SetAlpha(1.0)
             frame.unit = nil
             MP.activePlates[unit] = nil
         end
     elseif event == "PLAYER_TARGET_CHANGED" then
         for _, frame in pairs(MP.activePlates) do
             MP:UpdateTargetHighlight(frame)
+            MP:UpdateComboPoints(frame)
             MP:UpdateRaidIcon(frame)
             MP:UpdateThreat(frame)
             MP:UpdateHealth(frame)
@@ -2833,6 +3662,13 @@ f:SetScript("OnEvent", function(self, event, ...)
     elseif event == "RAID_TARGET_UPDATE" then
         for _, frame in pairs(MP.activePlates) do
             MP:UpdateRaidIcon(frame)
+        end
+    elseif event == "UNIT_POWER_UPDATE" or event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" or event == "PLAYER_COMBO_POINTS" then
+        local unitArg, powerType = ...
+        if event == "PLAYER_COMBO_POINTS" or (unitArg == "player" and (powerType == nil or powerType == "COMBO_POINTS")) then
+            for _, frame in pairs(MP.activePlates) do
+                MP:UpdateComboPoints(frame)
+            end
         end
     elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
         local unit = ...
@@ -2852,12 +3688,86 @@ f:SetScript("OnEvent", function(self, event, ...)
         if frame then
             MP:UpdateName(frame)
         end
+    elseif event == "UNIT_TARGET" then
+        local unit = ...
+        if unit then
+            local frame = MP.activePlates[unit]
+            if frame then
+                MP:UpdateTargetOfTarget(frame)
+            elseif unit == "target" then
+                for npUnit, npFrame in pairs(MP.activePlates) do
+                    if SafeCall(UnitIsUnit, npUnit, "target") then
+                        MP:UpdateTargetOfTarget(npFrame)
+                    end
+                end
+            end
+        end
     elseif event == "PLAYER_REGEN_ENABLED" then
         MP.consecratedMobs = {}
         MP.activeConsecration = nil
+        MP.threatSnapshots = {}
+        MP.trackedDots = {}
         for _, frame in pairs(MP.activePlates) do
+            frame.threatSnapshot = nil
+            frame.trackedDots = nil
+            if frame.threatText then
+                frame.threatText:SetAlpha(1.0)
+            end
+            MP:UpdateAggroFlash(frame, nil)
             MP:UpdateThreat(frame)
+            MP:UpdateTargetOfTarget(frame)
             MP:UpdateDebuffs(frame)
+            MP:UpdateDoTLethal(frame)
+        end
+    elseif event == "UNIT_COMBAT" then
+        local unit, action, _, amount = ...
+        if action == "WOUND" and amount and not IsSecret(amount) and type(amount) == "number" and amount > 0 then
+            local frame = unit and MP.activePlates[unit]
+            if not frame and unit == "target" then
+                frame = MP:GetTargetPlateFrame()
+            end
+            if frame and frame.trackedDots then
+                local now = GetTime()
+                local bestKey, bestDot, bestDiff
+                local activeCount, soleKey, soleDot = 0, nil, nil
+                for k, dot in pairs(frame.trackedDots) do
+                    if dot.expiresAt and dot.expiresAt > now then
+                        activeCount = activeCount + 1
+                        soleKey, soleDot = k, dot
+                        local est = dot.tickAmount or 0
+                        if est > 0 and amount >= est * 0.4 and amount <= est * 2.5 then
+                            local diff = math.abs(amount - est)
+                            if not bestDiff or diff < bestDiff then
+                                bestKey, bestDot, bestDiff = k, dot, diff
+                            end
+                        end
+                    end
+                end
+                if not bestDot and activeCount == 1 and soleDot then
+                    local est = soleDot.tickAmount or 0
+                    if est <= 0 or (amount >= est * 0.25 and amount <= est * 3.0) then
+                        bestKey, bestDot = soleKey, soleDot
+                    end
+                end
+                if bestDot then
+                    bestDot.tickAmount = amount
+                    if bestDot.name then
+                        MP.dotTickCache[bestDot.name] = amount
+                        if _G.MyPlatesDB then
+                            _G.MyPlatesDB.dotTickCache = _G.MyPlatesDB.dotTickCache or {}
+                            _G.MyPlatesDB.dotTickCache[bestDot.name] = amount
+                        end
+                    end
+                    if bestDot.spellId then
+                        MP.dotTickCache[bestDot.spellId] = amount
+                        if _G.MyPlatesDB then
+                            _G.MyPlatesDB.dotTickCache = _G.MyPlatesDB.dotTickCache or {}
+                            _G.MyPlatesDB.dotTickCache[bestDot.spellId] = amount
+                        end
+                    end
+                    MP:UpdateDoTLethal(frame)
+                end
+            end
         end
     elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" or event == "PLAYER_REGEN_DISABLED" then
         local unit = ...
@@ -2884,6 +3794,9 @@ f:SetScript("OnEvent", function(self, event, ...)
         if unit == "player" or unit == "pet" then
             local spellName, actualSpellID = ResolveSpellNameAndID(...)
             local now = GetTime()
+            if unit == "player" and spellName then
+                MP:RecordPlayerDoTCast(actualSpellID, spellName)
+            end
             if spellName then
                 local lower = strlower(spellName)
                 if string.find(lower, "consecrat") then
@@ -3127,12 +4040,18 @@ f:SetScript("OnUpdate", function(self, elapsed)
             end
         end
         
-        -- Periodically refresh raid target markers and catch missed non-target casts
+        -- Periodically refresh raid target markers, ToT labels, and catch missed non-target casts
         for _, frame in pairs(MP.activePlates) do
             if frame and frame.unit and frame:IsShown() then
                 MP:UpdateRaidIcon(frame)
+                if MP.db.showTargetOfTarget then
+                    MP:UpdateTargetOfTarget(frame)
+                end
                 if MP.db.showCastBar and frame.castBar and not frame.castBar:IsShown() then
                     MP:StartCast(frame, frame.unit)
+                end
+                if MP.db.enableDotKill and ((frame.trackedDots and next(frame.trackedDots) ~= nil) or _G.DoesItDie) then
+                    MP:UpdateDoTLethal(frame)
                 end
             end
         end
@@ -3207,6 +4126,98 @@ end
 
 SLASH_MYPLATESTEST1 = "/mptest"
 SlashCmdList["MYPLATESTEST"] = function(msg)
+    if msg and (string.find(strlower(msg), "combo") or string.find(strlower(msg), "cp")) then
+        if not UnitExists("target") then
+            print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest combo.")
+            return
+        end
+        local targetPlate = MP:GetTargetPlateFrame()
+        if not targetPlate then
+            print("|cffff0000[MyPlates Test]|r Target plate not found on screen. Toggle enemy plates ON (V).")
+            return
+        end
+        MP:UpdateComboPoints(targetPlate, 4, 5)
+        print("|cff00ff00[MyPlates Test]|r Previewing 4/5 Combo Points on target nameplate for 5s!")
+        DelayCall(5, function()
+            if targetPlate and targetPlate.unit then
+                MP:UpdateComboPoints(targetPlate)
+            end
+        end)
+        return
+    end
+    if msg and (string.find(strlower(msg), "dot") or string.find(strlower(msg), "die")) then
+        if not UnitExists("target") then
+            print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest dot.")
+            return
+        end
+        local targetPlate = MP:GetTargetPlateFrame()
+        if not targetPlate then
+            print("|cffff0000[MyPlates Test]|r Target plate not found on screen. Toggle enemy plates ON (V).")
+            return
+        end
+        targetPlate.trackedDots = targetPlate.trackedDots or {}
+        targetPlate.trackedDots["Test DoT"] = {
+            name = "Test DoT",
+            tickRate = 2.0,
+            tickAmount = 50000,
+            duration = 10,
+            appliedAt = GetTime(),
+            expiresAt = GetTime() + 10,
+        }
+        MP:UpdateDoTLethal(targetPlate)
+        print("|cff00ff00[MyPlates Test]|r Injected 10s lethal Test DoT (250k dmg) on target nameplate!")
+        return
+    end
+    if msg and (string.find(strlower(msg), "alert") or string.find(strlower(msg), "btp") or string.find(strlower(msg), "threat")) then
+        if not UnitExists("target") then
+            print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest alert.")
+            return
+        end
+        local targetPlate = MP:GetTargetPlateFrame()
+        if not targetPlate then
+            print("|cffff0000[MyPlates Test]|r Target plate not found on screen. Toggle enemy plates ON (V).")
+            return
+        end
+        if targetPlate.threatText then
+            targetPlate.threatText:SetAlpha(0.85)
+            local sr, sg, sb = MP:GetConfiguredThreatRGB("threatColorSecure", 0.2, 0.8, 0.2)
+            targetPlate.threatText:SetTextColor(sr, sg, sb)
+            targetPlate.threatText:SetText("+35%*")
+            MP:UpdateHealth(targetPlate)
+        end
+        if targetPlate.totText then
+            targetPlate.totText:SetTextColor(1.0, 0.96, 0.41) -- Rogue/class color example
+            targetPlate.totText:SetText("» Healer")
+            MP:UpdateToTAnchor(targetPlate)
+        end
+        if targetPlate.aggroFlash then
+            local dr, dg, db = MP:GetConfiguredThreatRGB("threatColorDanger", 0.9, 0.2, 0.2)
+            targetPlate.aggroFlash:SetBackdropBorderColor(dr, dg, db, 1)
+            targetPlate.aggroFlash:Show()
+            if targetPlate.aggroFlashAnim and not targetPlate.aggroFlashAnim:IsPlaying() then
+                targetPlate.aggroFlashAnim:Play()
+            end
+        end
+        print("|cff00ff00[MyPlates Test]|r Previewing Threat Snapshot (+35%*), Target-of-Target (» Healer), and Aggro Flash for 5s!")
+        DelayCall(5, function()
+            if targetPlate and targetPlate.unit then
+                if targetPlate.aggroFlashAnim and targetPlate.aggroFlashAnim:IsPlaying() then
+                    targetPlate.aggroFlashAnim:Stop()
+                end
+                if targetPlate.aggroFlash then
+                    targetPlate.aggroFlash:Hide()
+                end
+                if targetPlate.threatText then
+                    targetPlate.threatText:SetAlpha(1.0)
+                    targetPlate.threatText:SetText("")
+                end
+                MP:UpdateThreat(targetPlate)
+                MP:UpdateHealth(targetPlate)
+                MP:UpdateTargetHighlight(targetPlate)
+            end
+        end)
+        return
+    end
     if msg and (string.find(strlower(msg), "raid") or string.find(strlower(msg), "marker") or string.find(strlower(msg), "skull")) then
         if not UnitExists("target") then
             print("|cffff0000[MyPlates Test]|r Target a mob first, then type /mptest raid.")
